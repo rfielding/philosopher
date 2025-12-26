@@ -3456,7 +3456,7 @@ const indexHTML = `<!DOCTYPE html>
         .panel-header .usage.danger { color: #f85149; background: #3d0000; }
         
         /* Chat Panel */
-        .chat-panel { width: 30%; min-width: 280px; }
+        .chat-panel { width: 35%; min-width: 320px; }
         .messages { flex: 1; overflow-y: auto; padding: 0.75rem; }
         .message { margin: 0.5rem 0; padding: 0.6rem 0.8rem; border-radius: 6px; font-size: 0.9rem; line-height: 1.5; }
         .message.user { background: #1f6feb22; margin-left: 8%; border: 1px solid #1f6feb44; }
@@ -3477,8 +3477,7 @@ const indexHTML = `<!DOCTYPE html>
         }
         .input-area button:hover { background: #2ea043; }
         
-        /* Whiteboard Panel */
-        .whiteboard-panel { width: 35%; min-width: 300px; }
+        /* Whiteboard (in Spec Panel tab) */
         .whiteboard-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
         .whiteboard-input {
             flex: 1; display: flex; flex-direction: column;
@@ -3495,9 +3494,23 @@ const indexHTML = `<!DOCTYPE html>
         .whiteboard-preview .mermaid { background: transparent; }
         .whiteboard-preview .katex-display { margin: 0.5rem 0; }
         .whiteboard-preview .error { color: #f85149; font-size: 0.85rem; }
+        .whiteboard-controls {
+            padding: 0.5rem 0.75rem; background: #161b22; border-bottom: 1px solid #30363d;
+            display: flex; gap: 0.5rem; align-items: center;
+        }
+        .whiteboard-controls button {
+            padding: 0.35rem 0.6rem; border: 1px solid #30363d; border-radius: 4px;
+            background: #21262d; color: #c9d1d9; font-size: 0.8rem; cursor: pointer;
+        }
+        .whiteboard-controls button:hover { background: #30363d; }
+        .whiteboard-controls button.primary { background: #238636; border-color: #238636; }
+        .whiteboard-controls button.primary:hover { background: #2ea043; }
+        .whiteboard-controls .spacer { flex: 1; }
+        .tab-content { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+        .tab-content.active { display: flex; }
         
         /* Spec Panel */
-        .spec-panel { flex: 1; min-width: 300px; }
+        .spec-panel { flex: 1; min-width: 400px; }
         .spec-tabs { 
             display: flex; background: #161b22; border-bottom: 1px solid #30363d;
         }
@@ -3551,7 +3564,7 @@ const indexHTML = `<!DOCTYPE html>
         <div class="messages" id="messages">
             <div class="message assistant">
                 <p>Let's design a protocol together.</p>
-                <p>Use the <strong>Whiteboard</strong> to sketch ideas. Message flows like <code>A -> B: msg</code> and state transitions like <code>X --> Y</code> will render as diagrams. Click <strong>Formalize</strong> when ready.</p>
+                <p>Use the <strong>Whiteboard</strong> tab to sketch ideas. Message flows like <code>A -> B: msg</code> and state transitions like <code>X --> Y</code> will render as diagrams. Click <strong>Formalize</strong> when ready.</p>
             </div>
         </div>
         <div class="input-area">
@@ -3560,19 +3573,37 @@ const indexHTML = `<!DOCTYPE html>
         </div>
     </div>
     
-    <!-- Whiteboard Panel -->
-    <div class="panel whiteboard-panel">
+    <!-- Specification Panel (with Whiteboard tab) -->
+    <div class="panel spec-panel">
         <div class="panel-header">
-            <span class="title">📝 Whiteboard</span>
-            <span class="spacer"></span>
-            <button onclick="clearWhiteboard()">Clear</button>
-            <button onclick="aiPreview()" title="AI interprets sketch + commands">✨ AI</button>
-            <button id="newSpecBtn" style="display:none" onclick="newSpec()">New</button>
-            <button class="primary" id="formalizeBtn" onclick="formalizeWhiteboard()">Formalize →</button>
+            <span class="title">📋 Specification</span>
         </div>
-        <div class="whiteboard-area">
-            <div class="whiteboard-input">
-                <textarea id="whiteboard" placeholder="Sketch multiple diagrams...
+        <div class="spec-tabs">
+            <div class="spec-tab active" data-tab="markdown" onclick="showTab('markdown')">Document</div>
+            <div class="spec-tab" data-tab="code" onclick="showTab('code')">LISP</div>
+            <div class="spec-tab" data-tab="whiteboard" onclick="showTab('whiteboard')">Whiteboard</div>
+        </div>
+        <div class="tab-content active" id="tab-markdown">
+            <div class="spec-content markdown" id="specContent">
+                <div class="empty-state">Formal specification will appear here...</div>
+            </div>
+        </div>
+        <div class="tab-content" id="tab-code">
+            <div class="spec-content code-view" id="codeContent">
+                <div class="empty-state">LISP code will appear here...</div>
+            </div>
+        </div>
+        <div class="tab-content" id="tab-whiteboard">
+            <div class="whiteboard-controls">
+                <button onclick="clearWhiteboard()">Clear</button>
+                <button onclick="aiPreview()" title="AI interprets sketch + commands">✨ AI</button>
+                <span class="spacer"></span>
+                <button id="newSpecBtn" style="display:none" onclick="newSpec()">New</button>
+                <button class="primary" id="formalizeBtn" onclick="formalizeWhiteboard()">Formalize →</button>
+            </div>
+            <div class="whiteboard-area">
+                <div class="whiteboard-input">
+                    <textarea id="whiteboard" placeholder="Sketch multiple diagrams...
 
 MESSAGES (sequence diagram):
   A -> B: hello
@@ -3585,24 +3616,11 @@ STATES (state diagram):
   Waiting --> Done
 
 Click '✨ AI' for smart interpretation."></textarea>
+                </div>
+                <div class="whiteboard-preview" id="preview">
+                    <div class="empty-state">Live preview appears here...</div>
+                </div>
             </div>
-            <div class="whiteboard-preview" id="preview">
-                <div class="empty-state">Live preview appears here...</div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Specification Panel -->
-    <div class="panel spec-panel">
-        <div class="panel-header">
-            <span class="title">📋 Specification</span>
-        </div>
-        <div class="spec-tabs">
-            <div class="spec-tab active" onclick="showTab('markdown')">Document</div>
-            <div class="spec-tab" onclick="showTab('code')">LISP</div>
-        </div>
-        <div class="spec-content markdown" id="specContent">
-            <div class="empty-state">Formal specification will appear here...</div>
         </div>
     </div>
 
@@ -3965,17 +3983,16 @@ Click '✨ AI' for smart interpretation."></textarea>
         }
         
         function updateSpecPanel() {
-            const container = document.getElementById('specContent');
+            const markdownContainer = document.getElementById('specContent');
+            const codeContainer = document.getElementById('codeContent');
             
-            if (currentTab === 'markdown') {
-                container.className = 'spec-content markdown';
-                if (!currentMarkdown) {
-                    container.innerHTML = '<div class="empty-state">Formal specification will appear here...</div>';
-                    return;
-                }
-                container.innerHTML = marked.parse(currentMarkdown);
+            // Update markdown tab content
+            if (!currentMarkdown) {
+                markdownContainer.innerHTML = '<div class="empty-state">Formal specification will appear here...</div>';
+            } else {
+                markdownContainer.innerHTML = marked.parse(currentMarkdown);
                 setTimeout(() => {
-                    container.querySelectorAll('pre code.language-mermaid').forEach((el, i) => {
+                    markdownContainer.querySelectorAll('pre code.language-mermaid').forEach((el, i) => {
                         const wrapper = document.createElement('div');
                         wrapper.className = 'mermaid';
                         wrapper.id = 'mermaid-spec-' + Date.now() + '-' + i;
@@ -3984,21 +4001,34 @@ Click '✨ AI' for smart interpretation."></textarea>
                     });
                     mermaid.run();
                 }, 50);
+            }
+            
+            // Update code tab content
+            if (!currentDoc) {
+                codeContainer.innerHTML = '<div class="empty-state">LISP code will appear here...</div>';
             } else {
-                container.className = 'spec-content code-view';
-                if (!currentDoc) {
-                    container.innerHTML = '<div class="empty-state">LISP code will appear here...</div>';
-                    return;
-                }
-                container.innerHTML = '<pre><code>' + escapeHtml(currentDoc) + '</code></pre>';
+                codeContainer.innerHTML = '<pre><code>' + escapeHtml(currentDoc) + '</code></pre>';
             }
         }
         
         function showTab(tab) {
             currentTab = tab;
-            document.querySelectorAll('.spec-tab').forEach(t => t.classList.remove('active'));
-            event.target.classList.add('active');
-            updateSpecPanel();
+            // Update tab button active state
+            document.querySelectorAll('.spec-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.tab === tab);
+            });
+            // Update tab content visibility
+            document.querySelectorAll('.tab-content').forEach(c => {
+                c.classList.toggle('active', c.id === 'tab-' + tab);
+            });
+            // Refresh content if needed
+            if (tab === 'markdown' || tab === 'code') {
+                updateSpecPanel();
+            }
+            // Focus whiteboard if switching to it
+            if (tab === 'whiteboard') {
+                setTimeout(() => document.getElementById('whiteboard').focus(), 100);
+            }
         }
         
         function updateUsage(usage) {
