@@ -2584,6 +2584,7 @@ func runServer(ev *Evaluator, port string) {
 	// Check for API keys
 	hasAnthropic := os.Getenv("ANTHROPIC_API_KEY") != ""
 	hasOpenAI := os.Getenv("OPENAI_API_KEY") != ""
+	hasGemini := os.Getenv("GEMINI_API_KEY") != ""
 	
 	fmt.Println("╔════════════════════════════════════════════════════════════╗")
 	fmt.Println("║            BoundedLISP - Philosophy Calculator              ║")
@@ -2600,6 +2601,11 @@ func runServer(ev *Evaluator, port string) {
 	} else {
 		fmt.Println("║  ✗ OPENAI_API_KEY not set                                  ║")
 	}
+	if hasGemini {
+		fmt.Println("║  ✓ GEMINI_API_KEY set                                      ║")
+	} else {
+		fmt.Println("║  ✗ GEMINI_API_KEY not set                                  ║")
+	}
 	fmt.Println("╠════════════════════════════════════════════════════════════╣")
 	fmt.Println("║  Type here for quick queries, or use the web UI            ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
@@ -2614,12 +2620,12 @@ func runServer(ev *Evaluator, port string) {
 	}()
 	
 	// Console input loop
-	runConsoleChat(hasAnthropic, hasOpenAI)
+	runConsoleChat(hasAnthropic, hasOpenAI, hasGemini)
 }
 
 // Console chat - type queries while server is running
-func runConsoleChat(hasAnthropic, hasOpenAI bool) {
-	if !hasAnthropic && !hasOpenAI {
+func runConsoleChat(hasAnthropic, hasOpenAI, hasGemini bool) {
+	if !hasAnthropic && !hasOpenAI && !hasGemini {
 		// No API keys, just block forever
 		select {}
 	}
@@ -2630,6 +2636,8 @@ func runConsoleChat(hasAnthropic, hasOpenAI bool) {
 	provider := "anthropic"
 	if !hasAnthropic && hasOpenAI {
 		provider = "openai"
+	} else if !hasAnthropic && !hasOpenAI && hasGemini {
+		provider = "gemini"
 	}
 	
 	for {
@@ -2653,6 +2661,8 @@ func runConsoleChat(hasAnthropic, hasOpenAI bool) {
 		var apiKey string
 		if provider == "openai" {
 			apiKey = os.Getenv("OPENAI_API_KEY")
+		} else if provider == "gemini" {
+			apiKey = os.Getenv("GEMINI_API_KEY")
 		} else {
 			apiKey = os.Getenv("ANTHROPIC_API_KEY")
 		}
@@ -2664,6 +2674,8 @@ func runConsoleChat(hasAnthropic, hasOpenAI bool) {
 		var inTok, outTok int
 		if provider == "openai" {
 			response, inTok, outTok, err = callOpenAI(apiKey, sess.Messages)
+		} else if provider == "gemini" {
+			response, inTok, outTok, err = callGemini(apiKey, sess.Messages)
 		} else {
 			response, inTok, outTok, err = callAnthropic(apiKey, sess.Messages)
 		}
@@ -2878,12 +2890,14 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	var apiKey string
 	if req.Provider == "openai" {
 		apiKey = os.Getenv("OPENAI_API_KEY")
+	} else if req.Provider == "gemini" {
+		apiKey = os.Getenv("GEMINI_API_KEY")
 	} else {
 		apiKey = os.Getenv("ANTHROPIC_API_KEY")
 	}
 	
 	if apiKey == "" {
-		http.Error(w, "API key not set in environment. Set ANTHROPIC_API_KEY or OPENAI_API_KEY", http.StatusBadRequest)
+		http.Error(w, "API key not set in environment. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY", http.StatusBadRequest)
 		return
 	}
 	
@@ -2901,6 +2915,8 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	
 	if req.Provider == "openai" {
 		response, inTok, outTok, err = callOpenAI(apiKey, sess.Messages)
+	} else if req.Provider == "gemini" {
+		response, inTok, outTok, err = callGemini(apiKey, sess.Messages)
 	} else {
 		response, inTok, outTok, err = callAnthropic(apiKey, sess.Messages)
 	}
@@ -3098,6 +3114,82 @@ func callOpenAI(apiKey string, messages []ChatMessage) (string, int, int, error)
 	return "", 0, 0, fmt.Errorf("empty response")
 }
 
+func callGemini(apiKey string, messages []ChatMessage) (string, int, int, error) {
+	if apiKey == "" {
+		return "", 0, 0, fmt.Errorf("API key required")
+	}
+	
+	// Build contents array for Gemini
+	// Gemini uses "user" and "model" roles, and system instruction is separate
+	contents := make([]map[string]interface{}, 0)
+	for _, m := range messages {
+		role := m.Role
+		if role == "assistant" {
+			role = "model"
+		}
+		contents = append(contents, map[string]interface{}{
+			"role": role,
+			"parts": []map[string]string{
+				{"text": m.Content},
+			},
+		})
+	}
+	
+	reqBody := map[string]interface{}{
+		"contents": contents,
+		"systemInstruction": map[string]interface{}{
+			"parts": []map[string]string{
+				{"text": systemPrompt},
+			},
+		},
+		"generationConfig": map[string]interface{}{
+			"maxOutputTokens": 4096,
+			"temperature":     0.7,
+		},
+	}
+	
+	// Use gemini-2.0-flash model
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", apiKey)
+	
+	body, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	defer resp.Body.Close()
+	
+	respBody, _ := io.ReadAll(resp.Body)
+	
+	if resp.StatusCode != 200 {
+		return "", 0, 0, fmt.Errorf("API error: %s", string(respBody))
+	}
+	
+	var result struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+		UsageMetadata struct {
+			PromptTokenCount     int `json:"promptTokenCount"`
+			CandidatesTokenCount int `json:"candidatesTokenCount"`
+		} `json:"usageMetadata"`
+	}
+	json.Unmarshal(respBody, &result)
+	
+	if len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
+		return result.Candidates[0].Content.Parts[0].Text, 
+			result.UsageMetadata.PromptTokenCount, 
+			result.UsageMetadata.CandidatesTokenCount, nil
+	}
+	return "", 0, 0, fmt.Errorf("empty response")
+}
+
 func extractSpec(response string) string {
 	// Look for markdown code blocks with lisp
 	lines := strings.Split(response, "\n")
@@ -3216,6 +3308,8 @@ func handleDiagram(ev *Evaluator) http.HandlerFunc {
 			var apiKey string
 			if req.Provider == "openai" {
 				apiKey = os.Getenv("OPENAI_API_KEY")
+			} else if req.Provider == "gemini" {
+				apiKey = os.Getenv("GEMINI_API_KEY")
 			} else {
 				apiKey = os.Getenv("ANTHROPIC_API_KEY")
 			}
@@ -3246,6 +3340,8 @@ Sketch:
 			var err error
 			if req.Provider == "openai" {
 				response, _, _, err = callOpenAI(apiKey, messages)
+			} else if req.Provider == "gemini" {
+				response, _, _, err = callGemini(apiKey, messages)
 			} else {
 				response, _, _, err = callAnthropic(apiKey, messages)
 			}
@@ -3449,6 +3545,7 @@ const indexHTML = `<!DOCTYPE html>
             <select id="provider">
                 <option value="anthropic">Claude</option>
                 <option value="openai">GPT-4</option>
+                <option value="gemini">Gemini</option>
             </select>
         </div>
         <div class="messages" id="messages">
