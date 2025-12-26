@@ -212,12 +212,6 @@
 (define add-lambda (lambda (x y) (+ x y)))
 (assert-eq (add-lambda 3 4) 7 "lambda")
 
-(define (variadic-sum . args)
-  (if (empty? args) 
-      0 
-      (+ (first args) (apply variadic-sum (rest args)))))
-; Note: apply not implemented, skip this test
-
 ; ============================================================================
 ; Conditional Tests
 ; ============================================================================
@@ -523,16 +517,6 @@
 (assert-eq (add5 3) 8 "closure add5")
 (assert-eq (add10 3) 13 "closure add10")
 
-; Counter closure
-(define (make-counter)
-  (let count 0
-    (lambda ()
-      (set! count (+ count 1))
-      count)))
-
-; Note: This won't work correctly due to how set! works with closures
-; Testing basic closure capture instead
-
 ; ============================================================================
 ; Complex Data Structure Tests
 ; ============================================================================
@@ -648,9 +632,6 @@
 
 ; Start the metrics collector
 (start-metrics!)
-
-; NOTE: In BoundedLISP, code before receive! may execute multiple times
-; due to how blocking works. Place metric calls AFTER receive! for accurate counts.
 
 ; A client that sends requests and records timing
 (define (test-client-loop count)
