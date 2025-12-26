@@ -3276,17 +3276,38 @@ func handleEval(ev *Evaluator) http.HandlerFunc {
 			return
 		}
 		
+		// Capture stdout/stderr for error detection
+		var output strings.Builder
+		var errors []string
+		
+		// Parse the code
 		parser := NewParser(req.Code)
 		exprs := parser.Parse()
 		
 		var results []string
 		for _, expr := range exprs {
 			result := ev.Eval(expr, nil)
-			results = append(results, result.String())
+			resultStr := result.String()
+			results = append(results, resultStr)
+			
+			// Check for error indicators
+			if strings.HasPrefix(resultStr, "Error:") || 
+			   strings.HasPrefix(resultStr, "Undefined symbol:") ||
+			   strings.HasPrefix(resultStr, "Parse error:") ||
+			   strings.Contains(resultStr, "not a function") ||
+			   strings.Contains(resultStr, "wrong number of arguments") ||
+			   strings.Contains(resultStr, "expected") {
+				errors = append(errors, resultStr)
+			}
+			output.WriteString(resultStr)
+			output.WriteString("\n")
 		}
 		
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"results": results,
+			"output":  output.String(),
+			"errors":  errors,
+			"success": len(errors) == 0,
 		})
 	}
 }
@@ -3638,6 +3659,7 @@ Click '✨ AI' for smart interpretation."></textarea>
         marked.setOptions({ gfm: true, breaks: true });
         
         const NL = String.fromCharCode(10);  // Newline for mermaid
+        const FENCE = String.fromCharCode(96,96,96);  // Triple backtick for markdown code blocks
         let sessionId = 'session-' + Date.now();
         let currentTab = 'markdown';
         let currentDoc = '';
@@ -3925,18 +3947,49 @@ Click '✨ AI' for smart interpretation."></textarea>
             document.getElementById('whiteboard').focus();
         }
         
-        async function sendMessage() {
+        // Execute LISP code and return results
+        async function executeCode(code) {
+            try {
+                const resp = await fetch('/eval', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code })
+                });
+                if (!resp.ok) {
+                    return { success: false, errors: [await resp.text()], output: '' };
+                }
+                return await resp.json();
+            } catch (err) {
+                return { success: false, errors: [err.message], output: '' };
+            }
+        }
+        
+        // Retry counter for auto-fix loop prevention
+        let autoFixRetries = 0;
+        const MAX_AUTO_FIX_RETRIES = 3;
+        
+        async function sendMessage(message, isAutoFix = false) {
             const input = document.getElementById('input');
-            const message = input.value.trim();
+            if (!message) {
+                message = input.value.trim();
+            }
             if (!message) return;
             
             const provider = document.getElementById('provider').value;
-            addMessage('user', message);
-            input.value = '';
+            
+            // Only show user message if not an auto-fix retry
+            if (!isAutoFix) {
+                addMessage('user', message);
+                input.value = '';
+                autoFixRetries = 0; // Reset retry counter on new user message
+            } else {
+                // Show auto-fix attempt in chat
+                addMessage('user', '🔧 *Auto-fix attempt ' + autoFixRetries + '/' + MAX_AUTO_FIX_RETRIES + '*\n\n' + message);
+            }
             
             const loading = document.createElement('div');
             loading.className = 'message assistant';
-            loading.innerHTML = '<p><em>Thinking...</em></p>';
+            loading.innerHTML = '<p><em>' + (isAutoFix ? 'Attempting fix...' : 'Thinking...') + '</em></p>';
             loading.id = 'loading';
             document.getElementById('messages').appendChild(loading);
             loading.scrollIntoView({ behavior: 'smooth' });
@@ -3967,10 +4020,53 @@ Click '✨ AI' for smart interpretation."></textarea>
                     currentDoc = data.current_doc;
                     if (currentTab === 'code') updateSpecPanel();
                     updateFormalizeButton();
+                    
+                    // Auto-execute the generated code
+                    const execResult = await executeCode(currentDoc);
+                    
+                    if (!execResult.success && execResult.errors && execResult.errors.length > 0) {
+                        // Code has errors - attempt auto-fix
+                        autoFixRetries++;
+                        
+                        if (autoFixRetries <= MAX_AUTO_FIX_RETRIES) {
+                            const errorMsg = execResult.errors.join('\n');
+                            const fixPrompt = 
+                                '⚠️ The code you generated has errors when executed:\n\n' +
+                                FENCE + '\n' + errorMsg + '\n' + FENCE + '\n\n' +
+                                'Here is the code that failed:\n\n' +
+                                FENCE + 'lisp\n' + currentDoc + '\n' + FENCE + '\n\n' +
+                                'Please fix the errors and provide corrected code.';
+                            
+                            // Small delay before retry
+                            await new Promise(r => setTimeout(r, 500));
+                            
+                            // Recursive call with auto-fix message
+                            await sendMessage(fixPrompt, true);
+                        } else {
+                            // Max retries exceeded - report to user
+                            addMessage('assistant', 
+                                '❌ **Auto-fix failed after ' + MAX_AUTO_FIX_RETRIES + ' attempts.**\n\n' +
+                                'The code continues to have errors:\n\n' +
+                                FENCE + '\n' + execResult.errors.join('\n') + '\n' + FENCE + '\n\n' +
+                                'Please review the code in the LISP tab and describe what you are trying to accomplish so I can help fix it.');
+                            autoFixRetries = 0;
+                        }
+                    } else {
+                        // Code executed successfully
+                        autoFixRetries = 0;
+                        if (execResult.output && execResult.output.trim()) {
+                            // Show execution output if there's meaningful output
+                            const outputLines = execResult.output.trim().split('\n').filter(l => l.trim());
+                            if (outputLines.length > 0 && outputLines.some(l => !l.startsWith(';'))) {
+                                addMessage('assistant', '✅ Code executed successfully.');
+                            }
+                        }
+                    }
                 }
             } catch (err) {
                 document.getElementById('loading')?.remove();
                 addMessage('assistant', '❌ ' + err.message);
+                autoFixRetries = 0;
             }
         }
         
