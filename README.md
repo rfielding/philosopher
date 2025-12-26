@@ -106,9 +106,11 @@ Here's a simple example to get you started:
 
 ```bash
 # Example: Describe a simple producer-consumer system
-echo "A producer creates items and sends them to a consumer. 
+philosopher --output csp << 'EOF'
+A producer creates items and sends them to a consumer. 
 The consumer receives items and processes them. 
-They communicate through a buffer channel." | philosopher --output csp
+They communicate through a buffer channel.
+EOF
 ```
 
 This generates CSP like:
@@ -254,7 +256,7 @@ SYSTEM = ||| i:{0..4} @ (PHIL(i) [| {pickupLeft.i, pickupRight.i,
 Check for deadlock:
 ```bash
 philosopher --input dining_philosophers.csp --check deadlock-free
-# Result: DEADLOCK DETECTED (all philosophers pick up left fork)
+# Result: DEADLOCK DETECTED (e.g., when all philosophers simultaneously pick up left fork)
 ```
 
 ### Example 2: Client-Server Protocol
@@ -364,7 +366,7 @@ git push origin feature/amazing-feature
 
 ## License
 
-[Add appropriate license information]
+This project's license information can be found in the repository.
 
 ## Contact and Support
 
