@@ -3,7 +3,7 @@ A Philosophy Calculator to turn an English chat into CSP that can be turned into
 
 A philosophy calculator for temporal logic and protocol design.
 
-!(ui.png)[ui.png]
+![ui.png](ui.png)
 
 ## What Is This?
 
