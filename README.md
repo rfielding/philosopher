@@ -3,6 +3,8 @@ A Philosophy Calculator to turn an English chat into CSP that can be turned into
 
 A philosophy calculator for temporal logic and protocol design.
 
+!(ui.png)[ui.png]
+
 ## What Is This?
 
 Most temporal logic tools (NuSMV, SPIN, TLA+) require you to already know what you want to specify. They're verification tools, not thinking tools.
