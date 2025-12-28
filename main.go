@@ -2579,6 +2579,7 @@ func runServer(ev *Evaluator, port string) {
 	http.HandleFunc("/versions", handleVersions)
 	http.HandleFunc("/version/", handleGetVersion)
 	http.HandleFunc("/eval", handleEval(ev))
+	http.HandleFunc("/properties", handleProperties(ev))
 	http.HandleFunc("/diagram", handleDiagram(ev))
 	
 	// Check for API keys
@@ -3312,6 +3313,47 @@ func handleEval(ev *Evaluator) http.HandlerFunc {
 	}
 }
 
+func handleProperties(ev *Evaluator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Evaluate (properties->display) to get list of (name latex) pairs
+		parser := NewParser("(properties->display)")
+		exprs := parser.Parse()
+		
+		type Property struct {
+			Name  string `json:"name"`
+			LaTeX string `json:"latex"`
+		}
+		
+		var properties []Property
+		
+		if len(exprs) > 0 {
+			result := ev.Eval(exprs[0], nil)
+			// Result should be a list of (name latex) pairs
+			if result.Type == TypeList {
+				for _, item := range result.List {
+					if item.Type == TypeList && len(item.List) >= 2 {
+						name := ""
+						latex := ""
+						if item.List[0].Type == TypeSymbol {
+							name = item.List[0].Symbol
+						}
+						if item.List[1].Type == TypeString {
+							latex = item.List[1].Str
+						}
+						if name != "" && latex != "" {
+							properties = append(properties, Property{Name: name, LaTeX: latex})
+						}
+					}
+				}
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"properties": properties,
+		})
+	}
+}
+
 func handleDiagram(ev *Evaluator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// POST: AI-powered sketch interpretation
@@ -3566,6 +3608,22 @@ const indexHTML = `<!DOCTYPE html>
             white-space: pre-wrap; word-wrap: break-word; border: 1px solid #30363d;
         }
         
+        .properties-view { padding: 1rem; }
+        .property-item {
+            background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+            padding: 0.75rem 1rem; margin-bottom: 0.75rem;
+        }
+        .property-name {
+            color: #58a6ff; font-weight: 600; font-size: 0.9rem;
+            margin-bottom: 0.5rem; font-family: 'Fira Code', monospace;
+        }
+        .property-formula {
+            color: #c9d1d9; font-size: 1.1rem; padding: 0.5rem;
+            background: #0d1117; border-radius: 4px; text-align: center;
+            overflow-x: auto;
+        }
+        .property-formula .katex { font-size: 1.1rem; }
+        
         .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #8b949e; font-style: italic; }
     </style>
 </head>
@@ -3602,6 +3660,7 @@ const indexHTML = `<!DOCTYPE html>
         <div class="spec-tabs">
             <div class="spec-tab active" data-tab="markdown" onclick="showTab('markdown')">Document</div>
             <div class="spec-tab" data-tab="code" onclick="showTab('code')">LISP</div>
+            <div class="spec-tab" data-tab="properties" onclick="showTab('properties')">Properties</div>
             <div class="spec-tab" data-tab="whiteboard" onclick="showTab('whiteboard')">Whiteboard</div>
         </div>
         <div class="tab-content active" id="tab-markdown">
@@ -3612,6 +3671,11 @@ const indexHTML = `<!DOCTYPE html>
         <div class="tab-content" id="tab-code">
             <div class="spec-content code-view" id="codeContent">
                 <div class="empty-state">LISP code will appear here...</div>
+            </div>
+        </div>
+        <div class="tab-content" id="tab-properties">
+            <div class="spec-content properties-view" id="propertiesContent">
+                <div class="empty-state">CTL properties will appear here...</div>
             </div>
         </div>
         <div class="tab-content" id="tab-whiteboard">
@@ -4054,6 +4118,8 @@ Click '✨ AI' for smart interpretation."></textarea>
                     } else {
                         // Code executed successfully
                         autoFixRetries = 0;
+                        // Refresh properties panel in case new ones were defined
+                        updatePropertiesPanel();
                         if (execResult.output && execResult.output.trim()) {
                             // Show execution output if there's meaningful output
                             const outputLines = execResult.output.trim().split('\n').filter(l => l.trim());
@@ -4121,9 +4187,45 @@ Click '✨ AI' for smart interpretation."></textarea>
             if (tab === 'markdown' || tab === 'code') {
                 updateSpecPanel();
             }
+            // Fetch and render properties
+            if (tab === 'properties') {
+                updatePropertiesPanel();
+            }
             // Focus whiteboard if switching to it
             if (tab === 'whiteboard') {
                 setTimeout(() => document.getElementById('whiteboard').focus(), 100);
+            }
+        }
+        
+        async function updatePropertiesPanel() {
+            const container = document.getElementById('propertiesContent');
+            try {
+                const resp = await fetch('/properties');
+                const data = await resp.json();
+                
+                if (!data.properties || data.properties.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No CTL properties defined yet.</div>';
+                    return;
+                }
+                
+                let html = '';
+                for (const prop of data.properties) {
+                    html += '<div class="property-item">';
+                    html += '<div class="property-name">' + escapeHtml(prop.name) + '</div>';
+                    html += '<div class="property-formula">';
+                    try {
+                        html += katex.renderToString(prop.latex, { 
+                            throwOnError: false,
+                            displayMode: true 
+                        });
+                    } catch (e) {
+                        html += escapeHtml(prop.latex);
+                    }
+                    html += '</div></div>';
+                }
+                container.innerHTML = html;
+            } catch (err) {
+                container.innerHTML = '<div class="empty-state">Error loading properties: ' + escapeHtml(err.message) + '</div>';
             }
         }
         

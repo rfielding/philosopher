@@ -211,6 +211,59 @@
   (tag 'ctl-implies (list phi psi)))
 
 ; ----------------------------------------------------------------------------
+; CTL to LaTeX Conversion
+; ----------------------------------------------------------------------------
+
+; Convert a CTL formula to LaTeX string
+(define (ctl->latex formula)
+  (if (not (tagged? formula))
+      ; Not a tagged value - convert to string
+      (if (symbol? formula)
+          (string-append "\\mathit{" (symbol->string formula) "}")
+          (if (string? formula)
+              (string-append "\\mathit{" formula "}")
+              (if (number? formula)
+                  (number->string formula)
+                  "?")))
+      ; Tagged CTL formula
+      (let type (tag-type formula)
+        (let val (tag-value formula)
+          (cond
+            ((= type 'ctl-prop)
+             (string-append "\\mathit{" (symbol->string val) "}"))
+            ((= type 'ctl-EX)
+             (string-append "\\mathbf{EX}\\," (ctl->latex val)))
+            ((= type 'ctl-AX)
+             (string-append "\\mathbf{AX}\\," (ctl->latex val)))
+            ((= type 'ctl-EF)
+             (string-append "\\mathbf{EF}\\," (ctl->latex val)))
+            ((= type 'ctl-AF)
+             (string-append "\\mathbf{AF}\\," (ctl->latex val)))
+            ((= type 'ctl-EG)
+             (string-append "\\mathbf{EG}\\," (ctl->latex val)))
+            ((= type 'ctl-AG)
+             (string-append "\\mathbf{AG}\\," (ctl->latex val)))
+            ((= type 'ctl-EU)
+             (string-append "\\mathbf{E}[" (ctl->latex (first val)) 
+                           " \\mathbf{U} " (ctl->latex (second val)) "]"))
+            ((= type 'ctl-AU)
+             (string-append "\\mathbf{A}[" (ctl->latex (first val)) 
+                           " \\mathbf{U} " (ctl->latex (second val)) "]"))
+            ((= type 'ctl-and)
+             (string-append "(" (ctl->latex (first val)) 
+                           " \\land " (ctl->latex (second val)) ")"))
+            ((= type 'ctl-or)
+             (string-append "(" (ctl->latex (first val)) 
+                           " \\lor " (ctl->latex (second val)) ")"))
+            ((= type 'ctl-not)
+             (string-append "\\neg " (ctl->latex val)))
+            ((= type 'ctl-implies)
+             (string-append "(" (ctl->latex (first val)) 
+                           " \\rightarrow " (ctl->latex (second val)) ")"))
+            (true
+             (string-append "\\text{" (symbol->string type) "}")))))))
+
+; ----------------------------------------------------------------------------
 ; Trace Recording and Visualization
 ; ----------------------------------------------------------------------------
 
@@ -360,9 +413,11 @@
 
 (define *properties* '())
 
+; Define a property - stores name, formula, and LaTeX rendering
 (define (defproperty name formula)
-  (set! *properties* (cons (list name formula) *properties*))
-  name)
+  (let latex (ctl->latex formula)
+    (set! *properties* (cons (list name formula latex) *properties*))
+    name))
 
 (define (get-property name)
   (let entry (assoc name *properties*)
@@ -370,8 +425,25 @@
         nil
         (second entry))))
 
+(define (get-property-latex name)
+  (let entry (assoc name *properties*)
+    (if (nil? entry)
+        nil
+        (third entry))))
+
 (define (list-properties)
   (map first *properties*))
+
+; Get all properties as list of (name formula latex) triples
+(define (all-properties)
+  *properties*)
+
+; Format all properties for display
+(define (properties->display)
+  (let props (reverse *properties*)
+    (map (lambda (p)
+           (list (first p) (third p)))
+         props)))
 
 ; ----------------------------------------------------------------------------
 ; Grammar Storage (placeholder for DSL)
