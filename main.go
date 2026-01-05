@@ -534,6 +534,10 @@ type Actor struct {
 	Env       *Env           // Actor's local environment
 	Code      Value          // Current code to execute (continuation)
 	Result    Value          // Last result
+	// CSP enforcement
+	GuardSeen     bool
+	CSPStrict     bool
+	CSPViolations []string
 }
 
 type Scheduler struct {
@@ -543,6 +547,7 @@ type Scheduler struct {
 	StepCount    int64
 	MaxSteps     int64         // 0 = unlimited
 	Trace        bool          // Print execution trace
+	CSPEnforce   bool          // CSP enforcement mode
 }
 
 func NewScheduler() *Scheduler {
@@ -552,6 +557,42 @@ func NewScheduler() *Scheduler {
 		MaxSteps: 0,
 		Trace:    false,
 	}
+}
+
+
+// ============================================================================
+// CSP Enforcement Helpers
+// ============================================================================
+
+func (ev *Evaluator) markGuardSeen() {
+	if ev.Scheduler == nil || ev.Scheduler.CurrentActor == "" {
+		return
+	}
+	if actor := ev.Scheduler.GetActor(ev.Scheduler.CurrentActor); actor != nil {
+		actor.GuardSeen = true
+	}
+}
+
+func (ev *Evaluator) resetCSPState(actorName string) {
+	if actor := ev.Scheduler.GetActor(actorName); actor != nil {
+		actor.GuardSeen = false
+	}
+}
+
+func (ev *Evaluator) checkCSPViolation(varName string) bool {
+	if ev.Scheduler == nil || !ev.Scheduler.CSPEnforce || ev.Scheduler.CurrentActor == "" {
+		return false
+	}
+	actor := ev.Scheduler.GetActor(ev.Scheduler.CurrentActor)
+	if actor == nil || actor.GuardSeen {
+		return false
+	}
+	violation := fmt.Sprintf("CSP violation: set! '%s' before guard in actor '%s'", varName, ev.Scheduler.CurrentActor)
+	actor.CSPViolations = append(actor.CSPViolations, violation)
+	if ev.Scheduler.Trace {
+		fmt.Fprintln(os.Stderr, "  ⚠ "+violation)
+	}
+	return actor.CSPStrict
 }
 
 func (s *Scheduler) AddActor(name string, mailboxSize int, env *Env, code Value) *Actor {
@@ -802,6 +843,74 @@ func (ev *Evaluator) setupBuiltins() {
 	env.Set("actor-state", Value{Type: TypeBuiltin, Builtin: builtinActorState})
 	env.Set("list-actors-sched", Value{Type: TypeBuiltin, Builtin: builtinListActorsSched})
 	env.Set("reset-scheduler", Value{Type: TypeBuiltin, Builtin: builtinResetScheduler})
+
+	// CSP enforcement builtins
+	env.Set("csp-enforce!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) > 0 {
+			ev.Scheduler.CSPEnforce = args[0].IsTruthy()
+		}
+		return Bool(ev.Scheduler.CSPEnforce)
+	}})
+	env.Set("csp-strict!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 1 {
+			return Bool(false)
+		}
+		var name string
+		if args[0].Type == TypeSymbol {
+			name = args[0].Symbol
+		} else if args[0].Type == TypeString {
+			name = args[0].Str
+		}
+		strict := len(args) > 1 && args[1].IsTruthy()
+		if actor := ev.Scheduler.GetActor(name); actor != nil {
+			actor.CSPStrict = strict
+			return Bool(true)
+		}
+		return Bool(false)
+	}})
+	env.Set("csp-violations", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		var result []Value
+		if len(args) > 0 {
+			// Get violations for specific actor
+			var name string
+			if args[0].Type == TypeSymbol {
+				name = args[0].Symbol
+			} else if args[0].Type == TypeString {
+				name = args[0].Str
+			}
+			if actor := ev.Scheduler.GetActor(name); actor != nil {
+				for _, v := range actor.CSPViolations {
+					result = append(result, Str(v))
+				}
+			}
+		} else {
+			// Get all violations
+			for actorName, actor := range ev.Scheduler.Actors {
+				for _, v := range actor.CSPViolations {
+					result = append(result, Lst(Sym(actorName), Str(v)))
+				}
+			}
+		}
+		return Lst(result...)
+	}})
+	env.Set("csp-clear-violations!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) > 0 {
+			var name string
+			if args[0].Type == TypeSymbol {
+				name = args[0].Symbol
+			} else if args[0].Type == TypeString {
+				name = args[0].Str
+			}
+			if actor := ev.Scheduler.GetActor(name); actor != nil {
+				actor.CSPViolations = nil
+			}
+		} else {
+			for _, actor := range ev.Scheduler.Actors {
+				actor.CSPViolations = nil
+			}
+		}
+		return Sym("ok")
+	}})
 }
 
 func (ev *Evaluator) Eval(expr Value, env *Env) Value {
@@ -962,6 +1071,10 @@ func (ev *Evaluator) evalStep(expr Value, env *Env) Value {
 					return Nil()
 				}
 				name := expr.List[1].Symbol
+                // CSP enforcement: check for violation before guard
+				if ev.checkCSPViolation(name) {
+					return Nil() // Block in strict mode
+				}
 				val := ev.Eval(expr.List[2], env)
 				// Try to set in existing scope, fall back to global
 				if _, found := env.Get(name); found {
@@ -1018,6 +1131,10 @@ func (ev *Evaluator) evalStep(expr Value, env *Env) Value {
 					return val
 				} else {
 					name := expr.List[1].Symbol
+                // CSP enforcement: check for violation before guard
+				if ev.checkCSPViolation(name) {
+					return Nil() // Block in strict mode
+				}
 					val := ev.Eval(expr.List[2], env)
 					ev.GlobalEnv.Set(name, val)
 					return val
@@ -2107,6 +2224,7 @@ func builtinSendTo(ev *Evaluator, args []Value, env *Env) Value {
 	}
 	
 	target := ev.Scheduler.GetActor(targetName)
+    ev.markGuardSeen() // CSP: send is a synchronization point
 	if target == nil {
 		fmt.Fprintf(os.Stderr, "send-to!: unknown actor %s\n", targetName)
 		return Nil()
@@ -2133,6 +2251,7 @@ func builtinSendTo(ev *Evaluator, args []Value, env *Env) Value {
 
 // (receive!) - receive from own mailbox, blocks if empty
 func builtinReceive(ev *Evaluator, args []Value, env *Env) Value {
+    ev.markGuardSeen() // CSP: mark guard seen
 	if ev.Scheduler.CurrentActor == "" {
 		fmt.Fprintln(os.Stderr, "receive!: no current actor")
 		return Nil()
@@ -2250,6 +2369,8 @@ func builtinRunScheduler(ev *Evaluator, args []Value, env *Env) Value {
 			// No runnable actors but not deadlocked - all must be done
 			return Lst(Sym("completed"), Num(float64(ev.Scheduler.StepCount)))
 		}
+        
+		ev.resetCSPState(actor.Name) // CSP: reset for new step
 		
 		if ev.Scheduler.Trace {
 			fmt.Printf("[%d] Running %s\n", ev.Scheduler.StepCount, actor.Name)
@@ -2323,6 +2444,7 @@ func (ev *Evaluator) tryUnblockActors() {
 			if len(parts) >= 2 {
 				targetName := parts[1]
 				target := ev.Scheduler.GetActor(targetName)
+    ev.markGuardSeen() // CSP: send is a synchronization point
 				if target != nil && !target.Mailbox.IsFull() {
 					ev.Scheduler.UnblockActor(name)
 				}
