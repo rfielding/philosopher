@@ -2625,20 +2625,33 @@ func main() {
 	ev := NewEvaluator(64) // 64 frame call stack limit
 
 	if len(os.Args) > 1 {
-		if os.Args[1] == "-repl" {
+		switch os.Args[1] {
+		case "-mcp":
+			runMCPServer()
+			return
+		case "-mcp-sse":
+			port := "3000"
+			if len(os.Args) > 2 {
+				port = os.Args[2]
+			}
+			runMCPSSEServer(port)
+			return
+		case "-repl":
 			runREPL(ev)
-		} else {
+			return
+		default:
 			// File mode - run a .lisp file
 			runFile(ev, os.Args[1])
+			return
 		}
-	} else {
-		// Default: web server mode
-		port := os.Getenv("KRIPKE_PORT")
-		if port == "" {
-			port = "8080"
-		}
-		runServer(ev, port)
 	}
+
+	// Default: web server mode
+	port := os.Getenv("KRIPKE_PORT")
+	if port == "" {
+		port = "8080"
+	}
+	runServer(ev, port)
 }
 
 // ============================================================================
@@ -4465,3 +4478,288 @@ Click '✨ AI' for smart interpretation."></textarea>
     </script>
 </body>
 </html>`
+
+// ============================================================================
+// MCP Server (Model Context Protocol)
+// ============================================================================
+//
+// Run:  ./philosopher -mcp          (stdio for Claude Desktop)
+//       ./philosopher -mcp-sse 3000 (HTTP/SSE for web clients)
+//
+// Claude Desktop config (~/.config/claude/claude_desktop_config.json):
+//   { "mcpServers": { "philosopher": { "command": "/path/to/philosopher", "args": ["-mcp"] } } }
+
+var mcpEvaluator *Evaluator
+
+func runMCPServer() {
+	mcpEvaluator = NewEvaluator(64)
+	loadLispModules(mcpEvaluator)
+
+	fmt.Fprintln(os.Stderr, "BoundedLISP MCP Server (stdio)")
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+
+		var req map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			mcpSendError(-32700, "Parse error", nil)
+			continue
+		}
+
+		method, _ := req["method"].(string)
+		id := req["id"]
+		params, _ := req["params"].(map[string]interface{})
+
+		switch method {
+		case "initialize":
+			mcpSendResult(id, map[string]interface{}{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]interface{}{"tools": map[string]bool{"listChanged": false}},
+				"serverInfo":      map[string]string{"name": "BoundedLISP", "version": "1.0.0"},
+			})
+		case "initialized":
+			// no response
+		case "tools/list":
+			mcpSendResult(id, map[string]interface{}{"tools": mcpToolDefs()})
+		case "tools/call":
+			mcpSendResult(id, mcpCallTool(params))
+		default:
+			mcpSendError(-32601, "Method not found: "+method, id)
+		}
+	}
+}
+
+func runMCPSSEServer(port string) {
+	mcpEvaluator = NewEvaluator(64)
+	loadLispModules(mcpEvaluator)
+
+	fmt.Printf("BoundedLISP MCP Server (SSE) on :%s\n", port)
+
+	http.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "event: endpoint\ndata: /message\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+	})
+
+	http.HandleFunc("/message", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "POST required", 405)
+			return
+		}
+		var req map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&req)
+		method, _ := req["method"].(string)
+		id := req["id"]
+		params, _ := req["params"].(map[string]interface{})
+
+		var result interface{}
+		switch method {
+		case "initialize":
+			result = map[string]interface{}{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]interface{}{"tools": map[string]bool{"listChanged": false}},
+				"serverInfo":      map[string]string{"name": "BoundedLISP", "version": "1.0.0"},
+			}
+		case "tools/list":
+			result = map[string]interface{}{"tools": mcpToolDefs()}
+		case "tools/call":
+			result = mcpCallTool(params)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": result})
+	})
+
+	http.ListenAndServe(":"+port, nil)
+}
+
+func mcpSendResult(id, result interface{}) {
+	out, _ := json.Marshal(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": result})
+	fmt.Println(string(out))
+}
+
+func mcpSendError(code int, msg string, id interface{}) {
+	out, _ := json.Marshal(map[string]interface{}{"jsonrpc": "2.0", "id": id, "error": map[string]interface{}{"code": code, "message": msg}})
+	fmt.Println(string(out))
+}
+
+func mcpToolDefs() []map[string]interface{} {
+	return []map[string]interface{}{
+		{"name": "eval_lisp", "description": "Evaluate BoundedLISP code",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"code": map[string]string{"type": "string"}}, "required": []string{"code"}}},
+		{"name": "run_simulation", "description": "Run scheduler for N steps",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"max_steps": map[string]interface{}{"type": "number"}}}},
+		{"name": "spawn_actor", "description": "Create actor",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"name": map[string]string{"type": "string"}, "mailbox_size": map[string]interface{}{"type": "number"}, "initial_state": map[string]string{"type": "string"}}, "required": []string{"name", "initial_state"}}},
+		{"name": "send_message", "description": "Send message to actor",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"actor": map[string]string{"type": "string"}, "message": map[string]string{"type": "string"}}, "required": []string{"actor", "message"}}},
+		{"name": "get_metrics", "description": "Get registry metrics",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}},
+		{"name": "get_actors", "description": "Get actor states",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"name": map[string]string{"type": "string"}}}},
+		{"name": "reset", "description": "Reset scheduler",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}},
+		{"name": "csp_status", "description": "Get CSP violations",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}},
+		{"name": "csp_enforce", "description": "Enable CSP enforcement",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"enabled": map[string]string{"type": "boolean"}, "strict": map[string]string{"type": "boolean"}}}},
+	}
+}
+
+func mcpCallTool(params map[string]interface{}) map[string]interface{} {
+	name, _ := params["name"].(string)
+	args, _ := params["arguments"].(map[string]interface{})
+
+	var result interface{}
+	var isErr bool
+
+	switch name {
+	case "eval_lisp":
+		code, _ := args["code"].(string)
+		if code == "" {
+			result, isErr = "code required", true
+		} else {
+			var results []string
+			for _, expr := range NewParser(code).Parse() {
+				results = append(results, mcpEvaluator.Eval(expr, nil).String())
+			}
+			result = map[string]interface{}{"results": results}
+		}
+
+	case "run_simulation":
+		steps := 1000
+		if s, ok := args["max_steps"].(float64); ok {
+			steps = int(s)
+		}
+		for _, expr := range NewParser(fmt.Sprintf("(run-scheduler %d)", steps)).Parse() {
+			mcpEvaluator.Eval(expr, nil)
+		}
+		states := make(map[string]string)
+		for n, a := range mcpEvaluator.Scheduler.Actors {
+			s := "runnable"
+			if a.State == ActorBlocked {
+				s = "blocked:" + a.BlockedOn
+			} else if a.State == ActorDone {
+				s = "done"
+			}
+			states[n] = s
+		}
+		result = map[string]interface{}{"steps": mcpEvaluator.Scheduler.StepCount, "actors": states}
+
+	case "spawn_actor":
+		n, _ := args["name"].(string)
+		ms := 16
+		if m, ok := args["mailbox_size"].(float64); ok {
+			ms = int(m)
+		}
+		init, _ := args["initial_state"].(string)
+		for _, expr := range NewParser(fmt.Sprintf("(spawn-actor '%s %d '%s)", n, ms, init)).Parse() {
+			mcpEvaluator.Eval(expr, nil)
+		}
+		result = map[string]interface{}{"spawned": n}
+
+	case "send_message":
+		actor, _ := args["actor"].(string)
+		msg, _ := args["message"].(string)
+		for _, expr := range NewParser(fmt.Sprintf("(send-to! '%s %s)", actor, msg)).Parse() {
+			mcpEvaluator.Eval(expr, nil)
+		}
+		result = map[string]interface{}{"sent": actor, "message": msg}
+
+	case "get_metrics":
+		m := make(map[string]interface{})
+		for k, v := range mcpEvaluator.Registry {
+			m[k] = mcpFormatValue(v)
+		}
+		result = m
+
+	case "get_actors":
+		n, _ := args["name"].(string)
+		if n != "" {
+			if a := mcpEvaluator.Scheduler.GetActor(n); a != nil {
+				result = mcpActorInfo(a)
+			} else {
+				result, isErr = "not found", true
+			}
+		} else {
+			m := make(map[string]interface{})
+			for n, a := range mcpEvaluator.Scheduler.Actors {
+				m[n] = mcpActorInfo(a)
+			}
+			result = m
+		}
+
+	case "reset":
+		mcpEvaluator.Scheduler = NewScheduler()
+		result = map[string]bool{"reset": true}
+
+	case "csp_status":
+		v := make(map[string][]string)
+		for n, a := range mcpEvaluator.Scheduler.Actors {
+			if len(a.CSPViolations) > 0 {
+				v[n] = a.CSPViolations
+			}
+		}
+		result = map[string]interface{}{"enforce": mcpEvaluator.Scheduler.CSPEnforce, "violations": v}
+
+	case "csp_enforce":
+		if e, ok := args["enabled"].(bool); ok {
+			mcpEvaluator.Scheduler.CSPEnforce = e
+		}
+		if s, ok := args["strict"].(bool); ok && s {
+			for _, a := range mcpEvaluator.Scheduler.Actors {
+				a.CSPStrict = true
+			}
+		}
+		result = map[string]bool{"ok": true}
+
+	default:
+		result, isErr = "unknown tool: "+name, true
+	}
+
+	if isErr {
+		return map[string]interface{}{"content": []map[string]interface{}{{"type": "text", "text": fmt.Sprintf("Error: %v", result)}}, "isError": true}
+	}
+	txt, _ := json.MarshalIndent(result, "", "  ")
+	return map[string]interface{}{"content": []map[string]interface{}{{"type": "text", "text": string(txt)}}}
+}
+
+func mcpFormatValue(v Value) interface{} {
+	switch v.Type {
+	case TypeNumber:
+		return v.Number
+	case TypeString:
+		return v.Str
+	case TypeBool:
+		return v.Bool
+	case TypeList:
+		items := make([]interface{}, len(v.List))
+		for i, x := range v.List {
+			items[i] = mcpFormatValue(x)
+		}
+		return items
+	default:
+		return v.String()
+	}
+}
+
+func mcpActorInfo(a *Actor) map[string]interface{} {
+	s := "runnable"
+	if a.State == ActorBlocked {
+		s = "blocked"
+	} else if a.State == ActorDone {
+		s = "done"
+	}
+	return map[string]interface{}{
+		"state": s, "blocked_on": a.BlockedOn,
+		"mailbox": len(a.Mailbox.Data), "capacity": a.Mailbox.Capacity,
+		"csp_violations": a.CSPViolations,
+	}
+}
