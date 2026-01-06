@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BreadCo Simulation - xychart Demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #111827; 
+            color: #f3f4f6; 
+            padding: 2rem;
+            min-height: 100vh;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { color: #60a5fa; margin-bottom: 0.5rem; font-size: 2rem; }
+        h2 { color: #93c5fd; margin: 2rem 0 1rem; font-size: 1.25rem; }
+        .subtitle { color: #9ca3af; margin-bottom: 2rem; }
+        
+        .metrics { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); 
+            gap: 1rem; 
+            margin-bottom: 2rem; 
+        }
+        .metric { 
+            background: #1f2937; 
+            border: 1px solid #374151; 
+            border-radius: 8px; 
+            padding: 1rem; 
+        }
+        .metric-label { color: #9ca3af; font-size: 0.875rem; }
+        .metric-value { font-size: 1.5rem; font-weight: bold; }
+        .trend-up { color: #34d399; }
+        .trend-warn { color: #fbbf24; }
+        
+        .charts { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); 
+            gap: 1.5rem; 
+        }
+        .chart-card { 
+            background: #1f2937; 
+            border: 1px solid #374151; 
+            border-radius: 8px; 
+            padding: 1rem; 
+        }
+        .chart-title { color: #93c5fd; margin-bottom: 1rem; font-weight: 600; }
+        .mermaid { background: #111827; border-radius: 4px; padding: 1rem; }
+        
+        .insights {
+            background: #1f2937;
+            border: 1px solid #374151;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-top: 2rem;
+        }
+        .insight { 
+            display: flex; 
+            align-items: flex-start; 
+            gap: 0.75rem; 
+            margin-bottom: 0.75rem; 
+        }
+        .insight:last-child { margin-bottom: 0; }
+        .check { color: #34d399; }
+        .warn { color: #fbbf24; }
+        .info { color: #60a5fa; }
+        
+        pre {
+            background: #111827;
+            border-radius: 8px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-size: 0.875rem;
+            color: #86efac;
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🍞 BreadCo Simulation</h1>
+        <p class="subtitle">Multi-party protocol with xychart metrics visualization</p>
+        
+        <div class="metrics">
+            <div class="metric">
+                <div class="metric-label">Total Produced</div>
+                <div class="metric-value">98 <span class="trend-up">↑</span></div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Total Sold</div>
+                <div class="metric-value">63 <span style="color:#9ca3af">→</span></div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Revenue</div>
+                <div class="metric-value">$189 <span class="trend-up">↑</span></div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Inventory</div>
+                <div class="metric-value">35 <span class="trend-warn">⚠</span></div>
+            </div>
+        </div>
+
+        <h2>Message Flow</h2>
+        <div class="chart-card">
+            <pre class="mermaid">
+sequenceDiagram
+    participant P as Production
+    participant T as Trucks
+    participant S as StoreFront
+    participant C as Customers
+    P->>T: (bread qty)
+    T->>S: (delivery qty)
+    C->>S: (buy name qty)
+    S->>C: (purchase qty)
+            </pre>
+        </div>
+
+        <h2>Time Series Charts</h2>
+        <div class="charts">
+            <div class="chart-card">
+                <div class="chart-title">📈 Cumulative Production</div>
+                <pre class="mermaid">
+xychart-beta
+    title "Bread Produced"
+    x-axis [D1, D2, D3, D4, D5, D6, D7]
+    y-axis "Loaves" 0 --> 120
+    line [11, 23, 36, 50, 65, 81, 98]
+                </pre>
+            </div>
+            
+            <div class="chart-card">
+                <div class="chart-title">📊 Cumulative Sales</div>
+                <pre class="mermaid">
+xychart-beta
+    title "Bread Sold"
+    x-axis [D1, D2, D3, D4, D5, D6, D7]
+    y-axis "Loaves" 0 --> 70
+    line [9, 18, 27, 36, 45, 54, 63]
+                </pre>
+            </div>
+            
+            <div class="chart-card">
+                <div class="chart-title">💰 Revenue Over Time</div>
+                <pre class="mermaid">
+xychart-beta
+    title "Revenue ($)"
+    x-axis [D1, D2, D3, D4, D5, D6, D7]
+    y-axis "Dollars" 0 --> 200
+    bar [27, 54, 81, 108, 135, 162, 189]
+                </pre>
+            </div>
+            
+            <div class="chart-card">
+                <div class="chart-title">📦 Inventory Levels</div>
+                <pre class="mermaid">
+xychart-beta
+    title "End-of-Day Inventory"
+    x-axis [D1, D2, D3, D4, D5, D6, D7]
+    y-axis "Loaves" 0 --> 40
+    line [2, 5, 9, 14, 20, 27, 35]
+                </pre>
+            </div>
+        </div>
+
+        <div class="insights">
+            <h2 style="margin-top:0">📊 Key Insights</h2>
+            <div class="insight">
+                <span class="check">✓</span>
+                <span><strong>Supply meets demand:</strong> All customers served, zero unmet demand</span>
+            </div>
+            <div class="insight">
+                <span class="warn">⚠</span>
+                <span><strong>Inventory accumulating:</strong> Production outpacing sales by ~5 loaves/day</span>
+            </div>
+            <div class="insight">
+                <span class="info">💡</span>
+                <span><strong>Recommendation:</strong> Reduce production or add more customers to balance</span>
+            </div>
+        </div>
+
+        <h2>CSP-Compliant Actor Pattern</h2>
+        <pre>
+(define (storefront-loop)
+  (let msg (receive!)                    ; ← GUARD FIRST
+    (let cmd (first msg)
+      (if (= cmd 'delivery)
+        (let quantity (nth msg 1)
+          (metric-inc! 'inventory quantity)  ; ← Effect AFTER guard
+          (list 'become '(storefront-loop)))
+        ...))))
+        </pre>
+    </div>
+
+    <script>
+        mermaid.initialize({ 
+            startOnLoad: true,
+            theme: 'dark',
+            themeVariables: {
+                primaryColor: '#3b82f6',
+                primaryTextColor: '#f3f4f6',
+                primaryBorderColor: '#60a5fa',
+                lineColor: '#9ca3af',
+                secondaryColor: '#1e40af',
+                tertiaryColor: '#1f2937',
+                xyChart: {
+                    backgroundColor: '#111827',
+                    plotColorPalette: '#60a5fa,#34d399,#fbbf24,#f472b6'
+                }
+            }
+        });
+    </script>
+</body>
+</html>

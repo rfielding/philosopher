@@ -2845,7 +2845,6 @@ BoundedLISP is NOT Scheme or Common Lisp. Key differences:
 ### Truthiness (IMPORTANT!)
 Falsey: nil, false, '() (empty list), 0, ""
 Truthy: everything else
-This is JavaScript-like, NOT Scheme (where only #f is false) or CL (where only nil is false).
 
 ### Boolean literals
 Use: true, false, nil
@@ -2854,139 +2853,228 @@ NOT: #t/#f (Scheme) or t/nil (CL)
 ### Let syntax (DIFFERENT!)
 Simple let binds ONE variable:
   (let x 5 (+ x 1))        ; => 6
-  (let x 5 (print x) (* x 2))  ; multi-body ok
 
-NOT: (let ((x 5)) (+ x 1))  ; WRONG - that's Scheme/CL syntax
+NOT: (let ((x 5)) (+ x 1))  ; WRONG - Scheme syntax
 
 For multiple bindings use let*:
   (let* ((x 5) (y (+ x 1))) (* x y))
 
-### Define
-(define name value)
-(define (func-name args...) body...)
-
-### Define is ALWAYS GLOBAL (important!)
-(define ...) always writes to global scope, even inside functions.
-For local helper functions, use let + lambda:
-  (let helper (lambda (x) ...) 
-    (helper arg))
-NOT:
-  (define (helper x) ...)  ; WRONG - pollutes global namespace
-
-### Cond uses 'true' not 'else'
-(cond
-  ((< x 0) "negative")
-  ((> x 0) "positive")
-  (true "zero"))           ; NOT 'else'
+### Define is ALWAYS GLOBAL
+For local helpers, use let + lambda:
+  (let helper (lambda (x) ...) (helper arg))
 
 ### Lists
-(list 1 2 3)  or  '(1 2 3)
 (first lst), (rest lst), (nth lst i), (cons x lst)
 (empty? lst)  ; true for nil or '()
 
-### Comparison
-(= a b)   ; deep equality, works on lists
-(!= a b)
+## ═══════════════════════════════════════════════════════════════════════════
+## CRITICAL: CSP STATE PATTERN - EFFECTS ONLY IN TRANSITIONS
+## ═══════════════════════════════════════════════════════════════════════════
+
+### THE RULE
+Every set! MUST occur AFTER a blocking operation (receive!, send-to!).
+
+### CORRECT PATTERN
+` + "```lisp" + `
+(define (actor-loop x)
+  (let msg (receive!)           ; GUARD first
+    (set! count (+ count 1))    ; EFFECT after
+    (list 'become (list 'actor-loop (+ x 1)))))
+` + "```" + `
 
 ## Your Output Format
 
 ALWAYS respond with exactly THREE sections:
 
 ===CHAT===
-(1-3 sentences acknowledging the user and what you did)
+(1-3 sentences)
 
 ===MARKDOWN===
-(Full specification document with diagrams)
+(Specification with Program Graphs)
 
 ===LISP===
-(The complete LISP code - must be valid BoundedLISP)
+(Valid BoundedLISP code)
 
-## Markdown Document Structure
+## ═══════════════════════════════════════════════════════════════════════════
+## PROGRAM GRAPHS (EFSM) - REQUIRED FORMAT
+## ═══════════════════════════════════════════════════════════════════════════
 
-# Protocol Name
+Use Program Graph notation from formal methods. Each transition shows:
 
-Brief description.
+    source --> target: [guard] / actions
 
-## Actors
+Where:
+- [guard] = condition in brackets (receive!, send!, boolean test)
+- actions = variable assignments, message sends (separated by ;)
 
-| Actor | Role |
-|-------|------|
-| Name | What they do |
+### Notation Rules
 
-## Interaction Diagram
+| Element | Syntax | Example |
+|---------|--------|---------|
+| Guard only | [condition] | [x > 0] |
+| Action only | var := expr | count := count + 1 |
+| Guard + Action | [guard] / action | [recv msg] / count := count + 1 |
+| Multiple actions | action1 ; action2 | x := x + 1 ; send!(ack) |
+| Message receive | [recv ?msg] | [recv ?order] / total := total + order.qty |
+| Message send | send!(target, data) | send!(client, ack) |
 
-` + "```mermaid" + `
-sequenceDiagram
-    participant A
-    participant B
-    A->>B: message
-` + "```" + `
-
-## Actor State Machines
-
-For EACH actor, show their EFSM:
-
-### Actor Name
+### Example: Counter Actor
 
 ` + "```mermaid" + `
 stateDiagram-v2
-    [*] --> Initial
-    Initial --> Next: action
-    Next --> [*]
+    [*] --> q0: count := 0
+    
+    q0 --> q1: [recv ?msg]
+    q1 --> q0: [msg = 'inc] / count := count + 1
+    q1 --> q0: [msg = 'dec] / count := count - 1
+    q1 --> q2: [msg = 'get] / send!(sender, count)
+    q2 --> q0
+    q1 --> [*]: [msg = 'stop]
 ` + "```" + `
 
-## Properties
+### Example: Producer-Consumer
 
-| Property | Description | Status |
-|----------|-------------|--------|
-| name | English description | ✓ Verified / ✗ Failed / ⏳ Pending |
+` + "```mermaid" + `
+stateDiagram-v2
+    [*] --> Produce
+    
+    Produce --> Produce: [buffer.size < MAX] / item := make(); buffer.push(item); produced := produced + 1
+    Produce --> Wait: [buffer.size >= MAX]
+    Wait --> Produce: [buffer.size < MAX]
+    
+    note right of Produce
+        Variables: buffer, produced, MAX
+    end note
+` + "```" + `
 
-## BoundedLISP Actor Pattern
+### Example: Factorial (from Nielson & Nielson)
+
+` + "```mermaid" + `
+stateDiagram-v2
+    [*] --> q0
+    q0 --> q1: y := 1
+    q1 --> q2: [x > 0]
+    q2 --> q3: y := y * x
+    q3 --> q1: x := x - 1
+    q1 --> [*]: [x <= 0]
+    
+    note right of q0
+        Input: x
+        Output: y = x!
+    end note
+` + "```" + `
+
+### BreadCo StoreFront Example
+
+` + "```mermaid" + `
+stateDiagram-v2
+    [*] --> Idle: inventory := 0
+
+    Idle --> Idle: [recv ?msg ∧ msg.cmd = 'delivery] / inventory := inventory + msg.qty
+    Idle --> Serving: [recv ?msg ∧ msg.cmd = 'buy] / customer := msg.from; want := msg.qty
+    
+    Serving --> Idle: [inventory >= want] / sold := min(want, inventory); inventory := inventory - sold; send!(customer, sold); revenue := revenue + sold * 3
+    Serving --> Idle: [inventory < want] / send!(customer, 'sold-out); unmet := unmet + want
+    
+    Idle --> [*]: [recv ?msg ∧ msg.cmd = 'stop]
+    
+    note right of Idle
+        Variables: inventory, revenue, unmet
+        Messages: delivery(qty), buy(from, qty)
+    end note
+` + "```" + `
+
+## Variable Declarations
+
+Always include a note showing:
+- State variables with initial values
+- Input/Output specification
+- Message types
+
+` + "```mermaid" + `
+stateDiagram-v2
+    [*] --> Init
+    
+    note right of Init
+        Variables:
+          count : int := 0
+          buffer : queue[10]
+        
+        Messages:
+          request(from, payload)
+          response(data)
+    end note
+` + "```" + `
+
+## Metrics Charts (xychart)
+
+Use xychart-beta for time series from simulations:
+
+` + "```mermaid" + `
+xychart-beta
+    title "Throughput Over Time"
+    x-axis [T1, T2, T3, T4, T5]
+    y-axis "Units" 0 --> 100
+    line [10, 25, 40, 55, 70]
+    bar [8, 20, 35, 50, 65]
+` + "```" + `
+
+### When to use xychart:
+- Cumulative metrics (production, sales, revenue)
+- Inventory/queue levels over time
+- Comparing actuals vs targets
+- Answering "how much", "trend" questions
+
+## Sequence Diagrams
+
+For message flows between actors:
+
+` + "```mermaid" + `
+sequenceDiagram
+    participant P as Production
+    participant T as Trucks
+    participant S as StoreFront
+    participant C as Customer
+    
+    P->>T: bread(qty)
+    T->>S: delivery(qty)
+    C->>S: buy(want)
+    alt inventory >= want
+        S->>C: purchase(qty)
+    else inventory < want
+        S->>C: sold-out
+    end
+` + "```" + `
+
+## Metrics Tracking Pattern
 
 ` + "```lisp" + `
-; Actor loop with state via become
-(define (server-loop request-count)
-  (let msg (receive!)
-    (let sender (first msg)
-      (let payload (rest msg)
-        (send-to! sender (list 'ack payload))
-        (list 'become (list 'server-loop (+ request-count 1)))))))
-
-; Spawn with: name, mailbox-size, initial-code
-(spawn-actor 'server 16 '(server-loop 0))
+;; In transitions (AFTER guard):
+(define (process-order)
+  (let msg (receive!)                    ; Guard
+    (let qty (nth msg 1)
+      (registry-set! 'total-sold 
+        (+ (registry-get 'total-sold) qty))
+      (list 'become '(process-order)))))
 ` + "```" + `
 
-Return values from actor body:
-- (list 'become code) - continue with new code/state
-- 'done - actor terminates
-- 'yield - yield timeslice
+## CSP Compliance Checklist
 
-## CTL Properties
-
-` + "```lisp" + `
-(defproperty 'always-responds 
-  (AG (ctl-implies (prop 'request) (AF (prop 'response)))))
-
-(defproperty 'no-deadlock
-  (AG (EX (prop 'true))))
-` + "```" + `
+Before generating:
+1. ☐ Every state's first operation is receive! or send-to!
+2. ☐ All set!/assignments come AFTER the guard
+3. ☐ Program graph shows [guard] / action format
+4. ☐ Variables declared in notes
+5. ☐ Transitions are complete (guard + effect)
 
 ## Guidelines
 
-- Start simple, add complexity incrementally
-- Each actor gets their own state machine diagram
-- Properties need English descriptions
-- Keep chat responses brief - the document tells the full story
-- Remember: empty list IS falsey in BoundedLISP
-
-## Incremental Updates
-
-When the user provides their current LISP specification alongside a new sketch:
-- Focus on what changed - don't regenerate everything
-- Preserve working code and properties
-- In your chat response, briefly explain what you modified
-- Only change the parts that need updating based on the new sketch`
-
+- Program graphs show COMPLETE transition information
+- Guards in [brackets], actions after /
+- Include variable declarations in notes
+- Use xycharts for simulation metrics
+- Sequence diagrams for message protocols
+- Keep chat brief - diagrams tell the story`
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(indexHTML))
