@@ -512,6 +512,7 @@ type Evaluator struct {
 	Registry     map[string]Value
 	GensymCount  int64
 	Scheduler    *Scheduler
+	DatalogDB    *DatalogDB  // Embedded Datalog for temporal reasoning
 }
 
 // ============================================================================
@@ -711,6 +712,7 @@ func NewEvaluator(callStackDepth int) *Evaluator {
 		Registry:    make(map[string]Value),
 		GensymCount: 0,
 		Scheduler:   NewScheduler(),
+		DatalogDB:   NewDatalogDB(),
 	}
 	ev.setupBuiltins()
 	return ev
@@ -911,6 +913,9 @@ func (ev *Evaluator) setupBuiltins() {
 		}
 		return Sym("ok")
 	}})
+
+	// Register Datalog builtins
+	RegisterDatalogBuiltins(ev)
 }
 
 func (ev *Evaluator) Eval(expr Value, env *Env) Value {
@@ -2897,146 +2902,146 @@ Every set! MUST occur AFTER a blocking operation (receive!, send-to!).
 
 ## Your Output Format
 
-ALWAYS respond with exactly THREE sections:
+ALWAYS respond with exactly THREE sections. Each section starts with its marker on its own line.
 
 ===CHAT===
-(1-3 sentences)
+Brief conversational response (1-3 sentences). No code here.
 
 ===MARKDOWN===
-(Specification with Program Graphs)
+Specification with diagrams, tables, explanations. All prose and mermaid goes here.
 
 ===LISP===
-(Valid BoundedLISP code)
+ONLY valid BoundedLISP code. NO markdown, NO prose, NO explanations, NO headers.
+The content must be directly parseable by the LISP interpreter.
+Do NOT include code fences - just raw LISP code.
+Do NOT include comments explaining what the code does - put explanations in ===MARKDOWN===.
+
+CORRECT ===LISP=== section (just code):
+
+===LISP===
+(define (counter-loop count)
+  (let msg (receive!)
+    (cond
+      ((eq? (car msg) 'inc)
+       (list 'become (list 'counter-loop (+ count 1))))
+      (else
+       (list 'become (list 'counter-loop count))))))
+
+(spawn 'counter '() '(counter-loop 0))
+
+WRONG ===LISP=== section (has markdown - DO NOT DO THIS):
+
+===LISP===
+Here is the counter:
+(define (counter-loop count) ...)
+The counter receives messages...
+
+^ WRONG - prose in LISP section causes parse errors!
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## PROGRAM GRAPHS (EFSM) - REQUIRED FORMAT
 ## ═══════════════════════════════════════════════════════════════════════════
 
-Use Program Graph notation from formal methods. Each transition shows:
+Use mermaid stateDiagram-v2 for visual structure, with transition tables for precise semantics.
 
-    source --> target: [guard] / actions
+### ⚠️ CRITICAL MERMAID SYNTAX RULES ⚠️
 
-Where:
-- [guard] = condition in brackets (receive!, send!, boolean test)
-- actions = variable assignments, message sends (separated by ;)
+**THESE CHARACTERS BREAK MERMAID - NEVER USE IN LABELS:**
 
-### Notation Rules
+❌ FORBIDDEN (causes parse error, NO escape works):
+- ':=' - NEVER use, causes parse error
+- '>=' - NEVER use, causes parse error
+- '<=' - NEVER use, causes parse error  
+- '!=' - NEVER use, causes parse error
+- '&&' or '||' - NEVER use
 
-| Element | Syntax | Example |
-|---------|--------|---------|
-| Guard only | [condition] | [x > 0] |
-| Action only | var := expr | count := count + 1 |
-| Guard + Action | [guard] / action | [recv msg] / count := count + 1 |
-| Multiple actions | action1 ; action2 | x := x + 1 ; send!(ack) |
-| Message receive | [recv ?msg] | [recv ?order] / total := total + order.qty |
-| Message send | send!(target, data) | send!(client, ack) |
+✅ USE TLA+ STYLE INSTEAD:
 
-### Example: Counter Actor
+For assignments, use prime notation: x '= x + 1 (TLA+ style, means "x-next equals")
 
-` + "```mermaid" + `
-stateDiagram-v2
-    [*] --> q0: count := 0
-    
-    q0 --> q1: [recv ?msg]
-    q1 --> q0: [msg = 'inc] / count := count + 1
-    q1 --> q0: [msg = 'dec] / count := count - 1
-    q1 --> q2: [msg = 'get] / send!(sender, count)
-    q2 --> q0
-    q1 --> [*]: [msg = 'stop]
-` + "```" + `
+| BAD (breaks) | GOOD (works) |
+|--------------|--------------|
+| x := x + 1 | x '= x + 1 |
+| count := 0 | count '= 0 |
+| inv := inv - qty | inv '= inv - qty |
 
-### Example: Producer-Consumer
+For comparisons, use words:
 
-` + "```mermaid" + `
-stateDiagram-v2
-    [*] --> Produce
-    
-    Produce --> Produce: [buffer.size < MAX] / item := make(); buffer.push(item); produced := produced + 1
-    Produce --> Wait: [buffer.size >= MAX]
-    Wait --> Produce: [buffer.size < MAX]
-    
-    note right of Produce
-        Variables: buffer, produced, MAX
-    end note
-` + "```" + `
+| BAD (breaks) | GOOD (works) |
+|--------------|--------------|
+| x >= 5 | x gte 5 |
+| inv >= want | enough inv |
+| x != y | x neq y |
 
-### Example: Factorial (from Nielson & Nielson)
+**Keep labels under 30 chars. For complex semantics, use a TRANSITION TABLE.**
+
+### Correct Pattern: Simple Mermaid + Transition Table
 
 ` + "```mermaid" + `
 stateDiagram-v2
-    [*] --> q0
-    q0 --> q1: y := 1
-    q1 --> q2: [x > 0]
-    q2 --> q3: y := y * x
-    q3 --> q1: x := x - 1
-    q1 --> [*]: [x <= 0]
+    [*] --> Idle
     
-    note right of q0
-        Input: x
-        Output: y = x!
-    end note
-` + "```" + `
-
-### BreadCo StoreFront Example
-
-` + "```mermaid" + `
-stateDiagram-v2
-    [*] --> Idle: inventory := 0
-
-    Idle --> Idle: [recv ?msg ∧ msg.cmd = 'delivery] / inventory := inventory + msg.qty
-    Idle --> Serving: [recv ?msg ∧ msg.cmd = 'buy] / customer := msg.from; want := msg.qty
+    Idle --> Recv: recv msg
+    Recv --> Idle: delivery
+    Recv --> Check: buy request
     
-    Serving --> Idle: [inventory >= want] / sold := min(want, inventory); inventory := inventory - sold; send!(customer, sold); revenue := revenue + sold * 3
-    Serving --> Idle: [inventory < want] / send!(customer, 'sold-out); unmet := unmet + want
-    
-    Idle --> [*]: [recv ?msg ∧ msg.cmd = 'stop]
+    Check --> Idle: enough stock
+    Check --> Idle: sold out
     
     note right of Idle
-        Variables: inventory, revenue, unmet
-        Messages: delivery(qty), buy(from, qty)
+        Vars: inventory, revenue
     end note
 ` + "```" + `
 
-## Variable Declarations
+**Transition Table (full semantics, use := or '= in tables):**
 
-Always include a note showing:
-- State variables with initial values
-- Input/Output specification
-- Message types
+| From | Guard | Action | To |
+|------|-------|--------|-----|
+| Idle | recv ?msg | — | Recv |
+| Recv | msg.cmd = delivery | inventory '= inventory + msg.qty | Idle |
+| Recv | msg.cmd = buy | customer '= msg.from; want '= msg.qty | Check |
+| Check | inventory gte want | sold '= want; inventory '= inventory - sold; send!(customer, sold) | Idle |
+| Check | inventory lt want | send!(customer, sold-out) | Idle |
+
+### Example: Counter Actor (TLA+ style in labels)
 
 ` + "```mermaid" + `
 stateDiagram-v2
-    [*] --> Init
+    [*] --> Ready
     
-    note right of Init
-        Variables:
-          count : int := 0
-          buffer : queue[10]
-        
-        Messages:
-          request(from, payload)
-          response(data)
+    Ready --> Ready: recv inc, count '= count + 1
+    Ready --> Ready: recv dec, count '= count - 1
+    Ready --> Ready: recv get, send count
+    Ready --> [*]: recv stop
+    
+    note right of Ready
+        count: int
     end note
 ` + "```" + `
 
-## Metrics Charts (xychart)
-
-Use xychart-beta for time series from simulations:
+### Example: BreadCo StoreFront
 
 ` + "```mermaid" + `
-xychart-beta
-    title "Throughput Over Time"
-    x-axis [T1, T2, T3, T4, T5]
-    y-axis "Units" 0 --> 100
-    line [10, 25, 40, 55, 70]
-    bar [8, 20, 35, 50, 65]
+stateDiagram-v2
+    [*] --> Idle
+    
+    Idle --> Idle: delivery, inv '= inv + qty
+    Idle --> Serving: buy request
+    
+    Serving --> Idle: inv gte want, sell
+    Serving --> Idle: inv lt want, reject
+    
+    note right of Idle
+        inv, revenue: int
+    end note
 ` + "```" + `
 
-### When to use xychart:
-- Cumulative metrics (production, sales, revenue)
-- Inventory/queue levels over time
-- Comparing actuals vs targets
-- Answering "how much", "trend" questions
+| From | Guard | Action | To |
+|------|-------|--------|-----|
+| Idle | recv delivery(qty) | inv '= inv + qty | Idle |
+| Idle | recv buy(from, qty) | customer '= from; want '= qty | Serving |
+| Serving | inv gte want | sold '= want; inv '= inv - sold; send ack | Idle |
+| Serving | inv lt want | send sold-out | Idle |
 
 ## Sequence Diagrams
 
@@ -3051,13 +3056,31 @@ sequenceDiagram
     
     P->>T: bread(qty)
     T->>S: delivery(qty)
-    C->>S: buy(want)
-    alt inventory >= want
+    C->>S: buy(qty)
+    alt enough stock
         S->>C: purchase(qty)
-    else inventory < want
+    else sold out
         S->>C: sold-out
     end
 ` + "```" + `
+
+## Metrics Charts (xychart)
+
+For time-series data from simulations:
+
+` + "```mermaid" + `
+xychart-beta
+    title "BreadCo 7-Day Metrics"
+    x-axis [D1, D2, D3, D4, D5, D6, D7]
+    y-axis "Units" 0 --> 100
+    line "Produced" [11, 23, 36, 50, 65, 81, 98]
+    line "Sold" [9, 18, 27, 36, 45, 54, 63]
+` + "```" + `
+
+Use xychart when showing:
+- Cumulative metrics over time
+- Comparison trends
+- Inventory/queue levels
 
 ## Metrics Tracking Pattern
 
@@ -3069,6 +3092,63 @@ sequenceDiagram
       (registry-set! 'total-sold 
         (+ (registry-get 'total-sold) qty))
       (list 'become '(process-order)))))
+` + "```" + `
+
+## Datalog for Fact Collection and Queries
+
+### What Datalog SUPPORTS:
+
+` + "```lisp" + `
+;; Assert facts
+(assert! 'sale 'store-a 'customer1 5)
+(assert-at! 100 'event 'start)  ; with timestamp
+
+;; Define rules (pattern matching only)
+(rule 'stockout
+  '(stockout ?store ?time)
+  '(inventory ?store 0 ?time))
+
+(rule 'deadlock
+  '(deadlock ?a ?b)
+  '(waiting-for ?a ?b)
+  '(waiting-for ?b ?a))
+
+;; Query facts
+(query 'sale '?store '?customer '?qty)
+(query 'stockout '?store '?time)
+
+;; Temporal checks
+(eventually? '(sale ?_ ?_ ?_))  ; EF - exists path where fact holds
+(never? '(deadlock ?_ ?_))      ; AG(not ...) - always globally not
+(always? '(inventory-positive)) ; AG - always globally
+` + "```" + `
+
+### What Datalog does NOT support:
+
+- NO aggregation (SUM, COUNT, AVG, MAX, MIN)
+- NO GROUP BY
+- NO sorting or ordering
+- NO arithmetic in rules (only pattern matching)
+
+WRONG (do not generate):
+` + "```" + `
+(rule 'top-revenue
+  '(top-revenue ?store ?total)
+  (aggregate ?total (+ ?sale-qty)    ; NOT SUPPORTED
+    (group-by ?store ...)))          ; NOT SUPPORTED
+` + "```" + `
+
+### For aggregation, use the registry:
+
+` + "```lisp" + `
+;; Track totals via registry, not Datalog
+(registry-set! 'total-sales 0)
+
+;; In actor, update registry
+(registry-set! 'total-sales (+ (registry-get 'total-sales) qty))
+
+;; Read final value
+(registry-get 'total-sales)
 ` + "```" + `
 
 ## CSP Compliance Checklist
@@ -3214,11 +3294,7 @@ func parseStructuredResponse(response string) (chat, markdown, lisp string) {
 		if lispIdx >= 0 {
 			lispStart := lispIdx + len("===LISP===")
 			lisp = strings.TrimSpace(response[lispStart:])
-			// Clean up code fences if present
-			lisp = strings.TrimPrefix(lisp, "```lisp")
-			lisp = strings.TrimPrefix(lisp, "```")
-			lisp = strings.TrimSuffix(lisp, "```")
-			lisp = strings.TrimSpace(lisp)
+			lisp = cleanLispSection(lisp)
 		}
 	} else {
 		// Fallback: try to extract LISP from code blocks
@@ -3230,6 +3306,47 @@ func parseStructuredResponse(response string) (chat, markdown, lisp string) {
 	}
 	
 	return
+}
+
+// cleanLispSection removes markdown artifacts that LLMs sometimes add to LISP sections
+func cleanLispSection(lisp string) string {
+	lines := strings.Split(lisp, "\n")
+	var cleanLines []string
+	inCodeBlock := false
+	
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Skip markdown headers
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		
+		// Skip prose lines (heuristic: starts with capital letter and has spaces, not a LISP form)
+		if len(trimmed) > 0 && trimmed[0] >= 'A' && trimmed[0] <= 'Z' && 
+		   strings.Contains(trimmed, " ") && !strings.HasPrefix(trimmed, "(") {
+			continue
+		}
+		
+		// Handle code fences
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		
+		// Skip empty lines at the start
+		if len(cleanLines) == 0 && trimmed == "" {
+			continue
+		}
+		
+		// Keep the line (either inside code block or looks like LISP)
+		if trimmed == "" || strings.HasPrefix(trimmed, "(") || strings.HasPrefix(trimmed, ";") ||
+		   strings.HasPrefix(trimmed, "'") || inCodeBlock {
+			cleanLines = append(cleanLines, line)
+		}
+	}
+	
+	return strings.TrimSpace(strings.Join(cleanLines, "\n"))
 }
 
 func callAnthropic(apiKey string, messages []ChatMessage) (string, int, int, error) {
@@ -4762,4 +4879,1091 @@ func mcpActorInfo(a *Actor) map[string]interface{} {
 		"mailbox": len(a.Mailbox.Data), "capacity": a.Mailbox.Capacity,
 		"csp_violations": a.CSPViolations,
 	}
+}
+
+// ============================================================================
+// Datalog Interpreter for BoundedLISP
+// ============================================================================
+// Term represents a Datalog term: variable, atom, number, or string
+type Term struct {
+	IsVar  bool
+	Name   string  // variable name (if IsVar) or atom name
+	Num    float64 // numeric value (if numeric term)
+	Str    string  // string value (if string term)
+	IsNum  bool
+	IsStr  bool
+	IsList bool
+	List   []Term // compound term (for lists)
+}
+
+// Fact is a ground (no variables) predicate
+type Fact struct {
+	Predicate string
+	Args      []Term
+	Time      int64 // timestamp for temporal queries
+}
+
+// Rule is a Horn clause: head :- body
+type Rule struct {
+	Head      Fact   // may contain variables
+	Body      []Goal // conjunction of goals
+	Name      string // optional rule name
+}
+
+// Goal is a single goal in a rule body
+type Goal struct {
+	Predicate string
+	Args      []Term
+	Negated   bool   // for negation-as-failure
+	IsBuiltin bool   // for built-in predicates like >, <, =
+	Builtin   string // builtin operator
+}
+
+// Binding maps variables to terms
+type Binding map[string]Term
+
+// DatalogDB holds all facts and rules
+type DatalogDB struct {
+	Facts    []Fact
+	Rules    []Rule
+	TimeNow  int64 // current simulation time
+	AutoTime bool  // auto-timestamp facts
+}
+
+// ============================================================================
+// Term Construction
+// ============================================================================
+
+func Var(name string) Term {
+	return Term{IsVar: true, Name: name}
+}
+
+func Atom(name string) Term {
+	return Term{Name: name}
+}
+
+func NumTerm(n float64) Term {
+	return Term{IsNum: true, Num: n}
+}
+
+func StrTerm(s string) Term {
+	return Term{IsStr: true, Str: s}
+}
+
+func ListTerm(terms ...Term) Term {
+	return Term{IsList: true, List: terms}
+}
+
+func (t Term) String() string {
+	if t.IsVar {
+		return "?" + t.Name
+	}
+	if t.IsNum {
+		if t.Num == float64(int64(t.Num)) {
+			return fmt.Sprintf("%d", int64(t.Num))
+		}
+		return fmt.Sprintf("%g", t.Num)
+	}
+	if t.IsStr {
+		return fmt.Sprintf("%q", t.Str)
+	}
+	if t.IsList {
+		parts := make([]string, len(t.List))
+		for i, x := range t.List {
+			parts[i] = x.String()
+		}
+		return "(" + strings.Join(parts, " ") + ")"
+	}
+	return t.Name
+}
+
+func (t Term) Equal(other Term) bool {
+	if t.IsVar != other.IsVar {
+		return false
+	}
+	if t.IsVar {
+		return t.Name == other.Name
+	}
+	if t.IsNum != other.IsNum {
+		return false
+	}
+	if t.IsNum {
+		return t.Num == other.Num
+	}
+	if t.IsStr != other.IsStr {
+		return false
+	}
+	if t.IsStr {
+		return t.Str == other.Str
+	}
+	if t.IsList != other.IsList {
+		return false
+	}
+	if t.IsList {
+		if len(t.List) != len(other.List) {
+			return false
+		}
+		for i := range t.List {
+			if !t.List[i].Equal(other.List[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return t.Name == other.Name
+}
+
+// ============================================================================
+// Unification
+// ============================================================================
+
+func (b Binding) Copy() Binding {
+	newB := make(Binding)
+	for k, v := range b {
+		newB[k] = v
+	}
+	return newB
+}
+
+// Deref follows variable bindings to get the actual term
+func (b Binding) Deref(t Term) Term {
+	if !t.IsVar {
+		if t.IsList {
+			// Deref list elements
+			newList := make([]Term, len(t.List))
+			for i, elem := range t.List {
+				newList[i] = b.Deref(elem)
+			}
+			return ListTerm(newList...)
+		}
+		return t
+	}
+	if bound, ok := b[t.Name]; ok {
+		return b.Deref(bound)
+	}
+	return t
+}
+
+// Unify attempts to unify two terms, extending bindings
+func Unify(t1, t2 Term, b Binding) (Binding, bool) {
+	t1 = b.Deref(t1)
+	t2 = b.Deref(t2)
+
+	// Both variables
+	if t1.IsVar && t2.IsVar {
+		if t1.Name == t2.Name {
+			return b, true
+		}
+		newB := b.Copy()
+		newB[t1.Name] = t2
+		return newB, true
+	}
+
+	// One variable
+	if t1.IsVar {
+		newB := b.Copy()
+		newB[t1.Name] = t2
+		return newB, true
+	}
+	if t2.IsVar {
+		newB := b.Copy()
+		newB[t2.Name] = t1
+		return newB, true
+	}
+
+	// Both lists
+	if t1.IsList && t2.IsList {
+		if len(t1.List) != len(t2.List) {
+			return nil, false
+		}
+		currentB := b
+		var ok bool
+		for i := range t1.List {
+			currentB, ok = Unify(t1.List[i], t2.List[i], currentB)
+			if !ok {
+				return nil, false
+			}
+		}
+		return currentB, true
+	}
+
+	// Both ground
+	if t1.Equal(t2) {
+		return b, true
+	}
+
+	return nil, false
+}
+
+// UnifyArgs unifies two argument lists
+func UnifyArgs(args1, args2 []Term, b Binding) (Binding, bool) {
+	if len(args1) != len(args2) {
+		return nil, false
+	}
+	currentB := b
+	var ok bool
+	for i := range args1 {
+		currentB, ok = Unify(args1[i], args2[i], currentB)
+		if !ok {
+			return nil, false
+		}
+	}
+	return currentB, true
+}
+
+// ============================================================================
+// Database Operations
+// ============================================================================
+
+func NewDatalogDB() *DatalogDB {
+	return &DatalogDB{
+		Facts:    make([]Fact, 0),
+		Rules:    make([]Rule, 0),
+		AutoTime: true,
+	}
+}
+
+func (db *DatalogDB) Assert(pred string, args ...Term) {
+	fact := Fact{
+		Predicate: pred,
+		Args:      args,
+		Time:      db.TimeNow,
+	}
+	db.Facts = append(db.Facts, fact)
+}
+
+func (db *DatalogDB) AssertAtTime(pred string, time int64, args ...Term) {
+	fact := Fact{
+		Predicate: pred,
+		Args:      args,
+		Time:      time,
+	}
+	db.Facts = append(db.Facts, fact)
+}
+
+func (db *DatalogDB) Retract(pred string, args ...Term) bool {
+	for i := len(db.Facts) - 1; i >= 0; i-- {
+		f := db.Facts[i]
+		if f.Predicate == pred && len(f.Args) == len(args) {
+			match := true
+			for j := range args {
+				if !args[j].Equal(f.Args[j]) {
+					match = false
+					break
+				}
+			}
+			if match {
+				db.Facts = append(db.Facts[:i], db.Facts[i+1:]...)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (db *DatalogDB) AddRule(name string, head Fact, body ...Goal) {
+	db.Rules = append(db.Rules, Rule{
+		Name: name,
+		Head: head,
+		Body: body,
+	})
+}
+
+func (db *DatalogDB) ClearFacts() {
+	db.Facts = make([]Fact, 0)
+}
+
+func (db *DatalogDB) ClearRules() {
+	db.Rules = make([]Rule, 0)
+}
+
+func (db *DatalogDB) Clear() {
+	db.ClearFacts()
+	db.ClearRules()
+}
+
+// ============================================================================
+// Query Engine
+// ============================================================================
+
+// QueryResult is one solution to a query
+type QueryResult struct {
+	Bindings Binding
+	Success  bool
+}
+
+// Query executes a query and returns all solutions
+func (db *DatalogDB) Query(pred string, args ...Term) []Binding {
+	goal := Goal{Predicate: pred, Args: args}
+	return db.solve([]Goal{goal}, make(Binding), 0)
+}
+
+// QueryGoals executes a conjunction of goals
+func (db *DatalogDB) QueryGoals(goals ...Goal) []Binding {
+	return db.solve(goals, make(Binding), 0)
+}
+
+const maxDepth = 100 // prevent infinite recursion
+
+func (db *DatalogDB) solve(goals []Goal, bindings Binding, depth int) []Binding {
+	if depth > maxDepth {
+		return nil
+	}
+
+	if len(goals) == 0 {
+		return []Binding{bindings}
+	}
+
+	goal := goals[0]
+	rest := goals[1:]
+	var results []Binding
+
+	// Handle negation
+	if goal.Negated {
+		positiveGoal := goal
+		positiveGoal.Negated = false
+		solutions := db.solve([]Goal{positiveGoal}, bindings, depth+1)
+		if len(solutions) == 0 {
+			// Negation succeeds
+			results = append(results, db.solve(rest, bindings, depth+1)...)
+		}
+		return results
+	}
+
+	// Handle builtins
+	if goal.IsBuiltin {
+		if db.evalBuiltin(goal, bindings) {
+			results = append(results, db.solve(rest, bindings, depth+1)...)
+		}
+		return results
+	}
+
+	// Handle temporal predicates
+	switch goal.Predicate {
+	case "at-time":
+		return db.solveAtTime(goal, rest, bindings, depth)
+	case "before":
+		return db.solveBefore(goal, rest, bindings, depth)
+	case "after":
+		return db.solveAfter(goal, rest, bindings, depth)
+	case "between":
+		return db.solveBetween(goal, rest, bindings, depth)
+	}
+
+	// Match against facts
+	for _, fact := range db.Facts {
+		if fact.Predicate == goal.Predicate {
+			if newB, ok := UnifyArgs(goal.Args, fact.Args, bindings); ok {
+				results = append(results, db.solve(rest, newB, depth+1)...)
+			}
+		}
+	}
+
+	// Match against rules
+	for _, rule := range db.Rules {
+		if rule.Head.Predicate == goal.Predicate {
+			// Rename variables to avoid conflicts
+			renamedRule := db.renameVars(rule, depth)
+			if newB, ok := UnifyArgs(goal.Args, renamedRule.Head.Args, bindings); ok {
+				// Solve body with new bindings
+				bodyResults := db.solve(renamedRule.Body, newB, depth+1)
+				for _, bodyB := range bodyResults {
+					results = append(results, db.solve(rest, bodyB, depth+1)...)
+				}
+			}
+		}
+	}
+
+	return results
+}
+
+// renameVars creates fresh variable names to avoid capture
+func (db *DatalogDB) renameVars(rule Rule, depth int) Rule {
+	suffix := fmt.Sprintf("_%d", depth)
+	varMap := make(map[string]string)
+
+	renameTerm := func(t Term) Term {
+		if t.IsVar {
+			if newName, ok := varMap[t.Name]; ok {
+				return Var(newName)
+			}
+			newName := t.Name + suffix
+			varMap[t.Name] = newName
+			return Var(newName)
+		}
+		if t.IsList {
+			newList := make([]Term, len(t.List))
+			for i, elem := range t.List {
+				if elem.IsVar {
+					if newName, ok := varMap[elem.Name]; ok {
+						newList[i] = Var(newName)
+					} else {
+						newName := elem.Name + suffix
+						varMap[elem.Name] = newName
+						newList[i] = Var(newName)
+					}
+				} else {
+					newList[i] = elem
+				}
+			}
+			return ListTerm(newList...)
+		}
+		return t
+	}
+
+	newHead := Fact{
+		Predicate: rule.Head.Predicate,
+		Args:      make([]Term, len(rule.Head.Args)),
+	}
+	for i, arg := range rule.Head.Args {
+		newHead.Args[i] = renameTerm(arg)
+	}
+
+	newBody := make([]Goal, len(rule.Body))
+	for i, g := range rule.Body {
+		newBody[i] = Goal{
+			Predicate: g.Predicate,
+			Args:      make([]Term, len(g.Args)),
+			Negated:   g.Negated,
+			IsBuiltin: g.IsBuiltin,
+			Builtin:   g.Builtin,
+		}
+		for j, arg := range g.Args {
+			newBody[i].Args[j] = renameTerm(arg)
+		}
+	}
+
+	return Rule{Head: newHead, Body: newBody, Name: rule.Name}
+}
+
+// ============================================================================
+// Builtin Predicates
+// ============================================================================
+
+func (db *DatalogDB) evalBuiltin(goal Goal, b Binding) bool {
+	if len(goal.Args) < 2 {
+		return false
+	}
+
+	left := b.Deref(goal.Args[0])
+	right := b.Deref(goal.Args[1])
+
+	// Both must be ground for comparison
+	if left.IsVar || right.IsVar {
+		return false
+	}
+
+	switch goal.Builtin {
+	case "=":
+		return left.Equal(right)
+	case "!=", "<>":
+		return !left.Equal(right)
+	case ">":
+		if left.IsNum && right.IsNum {
+			return left.Num > right.Num
+		}
+	case "<":
+		if left.IsNum && right.IsNum {
+			return left.Num < right.Num
+		}
+	case ">=":
+		if left.IsNum && right.IsNum {
+			return left.Num >= right.Num
+		}
+	case "<=":
+		if left.IsNum && right.IsNum {
+			return left.Num <= right.Num
+		}
+	}
+	return false
+}
+
+// ============================================================================
+// Temporal Queries
+// ============================================================================
+
+func (db *DatalogDB) solveAtTime(goal Goal, rest []Goal, bindings Binding, depth int) []Binding {
+	// at-time(Pred, Args..., Time)
+	if len(goal.Args) < 2 {
+		return nil
+	}
+
+	predTerm := bindings.Deref(goal.Args[0])
+	timeTerm := bindings.Deref(goal.Args[len(goal.Args)-1])
+	queryArgs := goal.Args[1 : len(goal.Args)-1]
+
+	var results []Binding
+
+	for _, fact := range db.Facts {
+		if predTerm.IsVar || fact.Predicate == predTerm.Name {
+			if newB, ok := UnifyArgs(queryArgs, fact.Args, bindings); ok {
+				// Unify time
+				factTime := NumTerm(float64(fact.Time))
+				if timeB, ok := Unify(timeTerm, factTime, newB); ok {
+					// Also bind predicate if it was a variable
+					if predTerm.IsVar {
+						timeB[predTerm.Name] = Atom(fact.Predicate)
+					}
+					results = append(results, db.solve(rest, timeB, depth+1)...)
+				}
+			}
+		}
+	}
+	return results
+}
+
+func (db *DatalogDB) solveBefore(goal Goal, rest []Goal, bindings Binding, depth int) []Binding {
+	// before(Pred, Args..., Time) - fact occurred before Time
+	if len(goal.Args) < 2 {
+		return nil
+	}
+
+	predTerm := bindings.Deref(goal.Args[0])
+	timeTerm := bindings.Deref(goal.Args[len(goal.Args)-1])
+	queryArgs := goal.Args[1 : len(goal.Args)-1]
+
+	if timeTerm.IsVar || !timeTerm.IsNum {
+		return nil
+	}
+	maxTime := int64(timeTerm.Num)
+
+	var results []Binding
+
+	for _, fact := range db.Facts {
+		if fact.Time < maxTime {
+			if predTerm.IsVar || fact.Predicate == predTerm.Name {
+				if newB, ok := UnifyArgs(queryArgs, fact.Args, bindings); ok {
+					if predTerm.IsVar {
+						newB[predTerm.Name] = Atom(fact.Predicate)
+					}
+					results = append(results, db.solve(rest, newB, depth+1)...)
+				}
+			}
+		}
+	}
+	return results
+}
+
+func (db *DatalogDB) solveAfter(goal Goal, rest []Goal, bindings Binding, depth int) []Binding {
+	// after(Pred, Args..., Time) - fact occurred after Time
+	if len(goal.Args) < 2 {
+		return nil
+	}
+
+	predTerm := bindings.Deref(goal.Args[0])
+	timeTerm := bindings.Deref(goal.Args[len(goal.Args)-1])
+	queryArgs := goal.Args[1 : len(goal.Args)-1]
+
+	if timeTerm.IsVar || !timeTerm.IsNum {
+		return nil
+	}
+	minTime := int64(timeTerm.Num)
+
+	var results []Binding
+
+	for _, fact := range db.Facts {
+		if fact.Time > minTime {
+			if predTerm.IsVar || fact.Predicate == predTerm.Name {
+				if newB, ok := UnifyArgs(queryArgs, fact.Args, bindings); ok {
+					if predTerm.IsVar {
+						newB[predTerm.Name] = Atom(fact.Predicate)
+					}
+					results = append(results, db.solve(rest, newB, depth+1)...)
+				}
+			}
+		}
+	}
+	return results
+}
+
+func (db *DatalogDB) solveBetween(goal Goal, rest []Goal, bindings Binding, depth int) []Binding {
+	// between(Pred, Args..., T1, T2) - fact occurred between T1 and T2
+	if len(goal.Args) < 3 {
+		return nil
+	}
+
+	predTerm := bindings.Deref(goal.Args[0])
+	t1Term := bindings.Deref(goal.Args[len(goal.Args)-2])
+	t2Term := bindings.Deref(goal.Args[len(goal.Args)-1])
+	queryArgs := goal.Args[1 : len(goal.Args)-2]
+
+	if t1Term.IsVar || !t1Term.IsNum || t2Term.IsVar || !t2Term.IsNum {
+		return nil
+	}
+	minTime := int64(t1Term.Num)
+	maxTime := int64(t2Term.Num)
+
+	var results []Binding
+
+	for _, fact := range db.Facts {
+		if fact.Time >= minTime && fact.Time <= maxTime {
+			if predTerm.IsVar || fact.Predicate == predTerm.Name {
+				if newB, ok := UnifyArgs(queryArgs, fact.Args, bindings); ok {
+					if predTerm.IsVar {
+						newB[predTerm.Name] = Atom(fact.Predicate)
+					}
+					results = append(results, db.solve(rest, newB, depth+1)...)
+				}
+			}
+		}
+	}
+	return results
+}
+
+// ============================================================================
+// Temporal Operators (CTL-style)
+// ============================================================================
+
+// Always checks if a goal holds for all times in the trace
+func (db *DatalogDB) Always(goal Goal) bool {
+	// Get all unique times
+	times := make(map[int64]bool)
+	for _, f := range db.Facts {
+		times[f.Time] = true
+	}
+
+	for t := range times {
+		// Check if goal holds at time t
+		db.TimeNow = t
+		results := db.solve([]Goal{goal}, make(Binding), 0)
+		if len(results) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Eventually checks if a goal holds at some time
+func (db *DatalogDB) Eventually(goal Goal) bool {
+	results := db.solve([]Goal{goal}, make(Binding), 0)
+	return len(results) > 0
+}
+
+// Never checks if a goal never holds
+func (db *DatalogDB) Never(goal Goal) bool {
+	return !db.Eventually(goal)
+}
+
+// LeadsTo checks if whenever goal1 holds, goal2 eventually holds after
+func (db *DatalogDB) LeadsTo(goal1, goal2 Goal) bool {
+	// Find all times where goal1 holds
+	results1 := db.solve([]Goal{goal1}, make(Binding), 0)
+	
+	for _, b := range results1 {
+		// Get the time when goal1 held (need to extract from facts)
+		// This is a simplified version - checks if goal2 ever holds
+		results2 := db.solve([]Goal{goal2}, b, 0)
+		if len(results2) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// ============================================================================
+// LISP Integration Helpers
+// ============================================================================
+
+// ValueToTerm converts a LISP Value to a Datalog Term
+func ValueToTerm(v Value) Term {
+	switch v.Type {
+	case TypeNumber:
+		return NumTerm(v.Number)
+	case TypeString:
+		return StrTerm(v.Str)
+	case TypeSymbol:
+		if len(v.Symbol) > 0 && v.Symbol[0] == '?' {
+			return Var(v.Symbol[1:])
+		}
+		return Atom(v.Symbol)
+	case TypeBool:
+		if v.Bool {
+			return Atom("true")
+		}
+		return Atom("false")
+	case TypeList:
+		terms := make([]Term, len(v.List))
+		for i, elem := range v.List {
+			terms[i] = ValueToTerm(elem)
+		}
+		return ListTerm(terms...)
+	default:
+		return Atom(v.String())
+	}
+}
+
+// TermToValue converts a Datalog Term to a LISP Value
+func TermToValue(t Term) Value {
+	if t.IsVar {
+		return Sym("?" + t.Name)
+	}
+	if t.IsNum {
+		return Num(t.Num)
+	}
+	if t.IsStr {
+		return Str(t.Str)
+	}
+	if t.IsList {
+		vals := make([]Value, len(t.List))
+		for i, elem := range t.List {
+			vals[i] = TermToValue(elem)
+		}
+		return Lst(vals...)
+	}
+	return Sym(t.Name)
+}
+
+// BindingsToValue converts bindings to a LISP association list
+func BindingsToValue(b Binding) Value {
+	pairs := make([]Value, 0, len(b))
+	for k, v := range b {
+		pairs = append(pairs, Lst(Sym(k), TermToValue(v)))
+	}
+	return Lst(pairs...)
+}
+
+// RegisterDatalogBuiltins adds Datalog functions to the evaluator
+func RegisterDatalogBuiltins(ev *Evaluator) {
+	env := ev.GlobalEnv
+
+	// Initialize Datalog DB in evaluator if not present
+	if ev.DatalogDB == nil {
+		ev.DatalogDB = NewDatalogDB()
+	}
+
+	// (assert! pred arg1 arg2 ...)
+	env.Set("assert!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 1 {
+			return Sym("error:assert-needs-predicate")
+		}
+		pred := args[0].Symbol
+		terms := make([]Term, len(args)-1)
+		for i, a := range args[1:] {
+			terms[i] = ValueToTerm(a)
+		}
+		ev.DatalogDB.Assert(pred, terms...)
+		return Sym("ok")
+	}})
+
+	// (assert-at! time pred args...)
+	env.Set("assert-at!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 2 {
+			return Sym("error:assert-at-needs-time-and-pred")
+		}
+		time := int64(args[0].Number)
+		pred := args[1].Symbol
+		terms := make([]Term, len(args)-2)
+		for i, a := range args[2:] {
+			terms[i] = ValueToTerm(a)
+		}
+		ev.DatalogDB.AssertAtTime(pred, time, terms...)
+		return Sym("ok")
+	}})
+
+	// (retract! pred arg1 arg2 ...)
+	env.Set("retract!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 1 {
+			return Sym("error:retract-needs-predicate")
+		}
+		pred := args[0].Symbol
+		terms := make([]Term, len(args)-1)
+		for i, a := range args[1:] {
+			terms[i] = ValueToTerm(a)
+		}
+		if ev.DatalogDB.Retract(pred, terms...) {
+			return Sym("ok")
+		}
+		return Sym("not-found")
+	}})
+
+	// (rule name (head-pred head-args...) (body-goal1) (body-goal2) ...)
+	env.Set("rule", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 2 {
+			return Sym("error:rule-needs-name-and-head")
+		}
+
+		name := args[0].Symbol
+
+		// Parse head: (pred arg1 arg2 ...)
+		if args[1].Type != TypeList || len(args[1].List) < 1 {
+			return Sym("error:rule-head-must-be-list")
+		}
+		headList := args[1].List
+		headPred := headList[0].Symbol
+		headArgs := make([]Term, len(headList)-1)
+		for i, a := range headList[1:] {
+			headArgs[i] = ValueToTerm(a)
+		}
+		head := Fact{Predicate: headPred, Args: headArgs}
+
+		// Parse body goals
+		body := make([]Goal, 0, len(args)-2)
+		for _, bodyArg := range args[2:] {
+			if bodyArg.Type != TypeList || len(bodyArg.List) < 1 {
+				continue
+			}
+			goalList := bodyArg.List
+			goalPred := goalList[0].Symbol
+
+			// Check for negation: (not (pred args...))
+			if goalPred == "not" && len(goalList) > 1 {
+				innerGoal := parseGoal(goalList[1])
+				innerGoal.Negated = true
+				body = append(body, innerGoal)
+				continue
+			}
+
+			// Check for builtins: (> a b), (< a b), (= a b), (!= a b)
+			if isBuiltinOp(goalPred) {
+				goalArgs := make([]Term, len(goalList)-1)
+				for i, a := range goalList[1:] {
+					goalArgs[i] = ValueToTerm(a)
+				}
+				body = append(body, Goal{
+					IsBuiltin: true,
+					Builtin:   goalPred,
+					Args:      goalArgs,
+				})
+				continue
+			}
+
+			// Regular goal
+			body = append(body, parseGoal(bodyArg))
+		}
+
+		ev.DatalogDB.AddRule(name, head, body...)
+		return Sym("ok")
+	}})
+
+	// (query pred arg1 ?x ...)
+	env.Set("query", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 1 {
+			return Lst()
+		}
+		pred := args[0].Symbol
+		terms := make([]Term, len(args)-1)
+		for i, a := range args[1:] {
+			terms[i] = ValueToTerm(a)
+		}
+
+		results := ev.DatalogDB.Query(pred, terms...)
+		return bindingsToLisp(results)
+	}})
+
+	// (query-all (goal1) (goal2) ...) - conjunction query
+	env.Set("query-all", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		goals := make([]Goal, 0, len(args))
+		for _, arg := range args {
+			if arg.Type == TypeList && len(arg.List) > 0 {
+				goals = append(goals, parseGoal(arg))
+			}
+		}
+
+		results := ev.DatalogDB.QueryGoals(goals...)
+		return bindingsToLisp(results)
+	}})
+
+	// (always? (goal))
+	env.Set("always?", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 1 || args[0].Type != TypeList {
+			return Bool(false)
+		}
+		goal := parseGoal(args[0])
+		return Bool(ev.DatalogDB.Always(goal))
+	}})
+
+	// (eventually? (goal))
+	env.Set("eventually?", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 1 || args[0].Type != TypeList {
+			return Bool(false)
+		}
+		goal := parseGoal(args[0])
+		return Bool(ev.DatalogDB.Eventually(goal))
+	}})
+
+	// (never? (goal))
+	env.Set("never?", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 1 || args[0].Type != TypeList {
+			return Bool(true)
+		}
+		goal := parseGoal(args[0])
+		return Bool(ev.DatalogDB.Never(goal))
+	}})
+
+	// (datalog-clear!)
+	env.Set("datalog-clear!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		ev.DatalogDB.ClearFacts()
+		return Sym("ok")
+	}})
+
+	// (datalog-clear-rules!)
+	env.Set("datalog-clear-rules!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		ev.DatalogDB.ClearRules()
+		return Sym("ok")
+	}})
+
+	// (datalog-time! n)
+	env.Set("datalog-time!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) > 0 && args[0].Type == TypeNumber {
+			ev.DatalogDB.TimeNow = int64(args[0].Number)
+		}
+		return Num(float64(ev.DatalogDB.TimeNow))
+	}})
+
+	// (datalog-time)
+	env.Set("datalog-time", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		return Num(float64(ev.DatalogDB.TimeNow))
+	}})
+
+	// (datalog-facts) - list all facts
+	env.Set("datalog-facts", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		facts := make([]Value, len(ev.DatalogDB.Facts))
+		for i, f := range ev.DatalogDB.Facts {
+			factTerms := make([]Value, len(f.Args)+2)
+			factTerms[0] = Sym(f.Predicate)
+			for j, t := range f.Args {
+				factTerms[j+1] = TermToValue(t)
+			}
+			factTerms[len(factTerms)-1] = Lst(Sym("@"), Num(float64(f.Time)))
+			facts[i] = Lst(factTerms...)
+		}
+		return Lst(facts...)
+	}})
+
+	// (datalog-rules) - list all rules
+	env.Set("datalog-rules", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		rules := make([]Value, len(ev.DatalogDB.Rules))
+		for i, r := range ev.DatalogDB.Rules {
+			rules[i] = Sym(r.Name)
+		}
+		return Lst(rules...)
+	}})
+}
+
+// Helper functions
+
+func isBuiltinOp(s string) bool {
+	switch s {
+	case "=", "!=", "<>", ">", "<", ">=", "<=":
+		return true
+	}
+	return false
+}
+
+func parseGoal(v Value) Goal {
+	if v.Type != TypeList || len(v.List) < 1 {
+		return Goal{}
+	}
+
+	pred := v.List[0].Symbol
+
+	// Check for negation
+	if pred == "not" && len(v.List) > 1 {
+		inner := parseGoal(v.List[1])
+		inner.Negated = true
+		return inner
+	}
+
+	// Check for builtin
+	if isBuiltinOp(pred) {
+		args := make([]Term, len(v.List)-1)
+		for i, a := range v.List[1:] {
+			args[i] = ValueToTerm(a)
+		}
+		return Goal{IsBuiltin: true, Builtin: pred, Args: args}
+	}
+
+	// Regular goal
+	args := make([]Term, len(v.List)-1)
+	for i, a := range v.List[1:] {
+		args[i] = ValueToTerm(a)
+	}
+	return Goal{Predicate: pred, Args: args}
+}
+
+func bindingsToLisp(results []Binding) Value {
+	if len(results) == 0 {
+		return Lst()
+	}
+
+	rows := make([]Value, len(results))
+	for i, b := range results {
+		pairs := make([]Value, 0, len(b))
+		for k, v := range b {
+			pairs = append(pairs, Lst(Sym(k), TermToValue(v)))
+		}
+		rows[i] = Lst(pairs...)
+	}
+	return Lst(rows...)
+}
+
+// ============================================================================
+// Auto-tracing for Actor System
+// ============================================================================
+
+// TraceEvent records an event in Datalog during simulation
+func (ev *Evaluator) TraceEvent(pred string, args ...Term) {
+	if ev.DatalogDB == nil {
+		return
+	}
+	ev.DatalogDB.Assert(pred, args...)
+}
+
+// TraceSend records a message send
+func (ev *Evaluator) TraceSend(from, to string, msg Value) {
+	if ev.DatalogDB == nil {
+		return
+	}
+	ev.DatalogDB.Assert("sent",
+		Atom(from),
+		Atom(to),
+		ValueToTerm(msg),
+	)
+}
+
+// TraceReceive records a message receive
+func (ev *Evaluator) TraceReceive(actor string, msg Value) {
+	if ev.DatalogDB == nil {
+		return
+	}
+	ev.DatalogDB.Assert("received",
+		Atom(actor),
+		ValueToTerm(msg),
+	)
+}
+
+// TraceStateChange records a state variable change
+func (ev *Evaluator) TraceStateChange(actor, varName string, oldVal, newVal Value) {
+	if ev.DatalogDB == nil {
+		return
+	}
+	ev.DatalogDB.Assert("state-change",
+		Atom(actor),
+		Atom(varName),
+		ValueToTerm(oldVal),
+		ValueToTerm(newVal),
+	)
+}
+
+// TraceGuard records a guard (receive/send) event
+func (ev *Evaluator) TraceGuard(actor, guardType string) {
+	if ev.DatalogDB == nil {
+		return
+	}
+	ev.DatalogDB.Assert("guard",
+		Atom(actor),
+		Atom(guardType),
+	)
+}
+
+// TraceEffect records an effect (set!) event
+func (ev *Evaluator) TraceEffect(actor, op, varName string) {
+	if ev.DatalogDB == nil {
+		return
+	}
+	ev.DatalogDB.Assert("effect",
+		Atom(actor),
+		Atom(op),
+		Atom(varName),
+	)
 }

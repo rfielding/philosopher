@@ -4,7 +4,11 @@
 
 ```bash
 # Build
-go build -o philosopher main.go
+go mod tidy
+go build -o philosopher
+
+# Test
+go test -v
 
 # Run modes
 ./philosopher              # Web UI (default)
@@ -43,37 +47,120 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 | `csp_status` | Get CSP violations |
 | `csp_enforce` | Enable/disable CSP enforcement |
 
-## Example Session
+## Embedded Datalog
 
-Claude can now directly control simulations:
+Temporal Datalog is embedded for fact collection and queries.
 
+### Facts
+
+```lisp
+;; Assert facts
+(assert! 'parent 'tom 'bob)
+(assert! 'owns 'alice 100)
+
+;; Assert with timestamp
+(assert-at! 5 'event 'start)
+
+;; Retract
+(retract! 'owns 'alice 100)
 ```
-You: "Run BreadCo for 7 days and show revenue"
 
-Claude uses:
-  1. eval_lisp → load breadco.lisp definitions
-  2. spawn_actor × 7 → create actors
-  3. run_simulation 700 → run 7 days
-  4. get_metrics → read revenue, inventory
-  
-Claude: "After 7 days: $189 revenue, 35 loaves inventory"
+### Rules
+
+```lisp
+;; grandparent(X, Z) :- parent(X, Y), parent(Y, Z)
+(rule 'grandparent
+  '(grandparent ?x ?z)
+  '(parent ?x ?y)
+  '(parent ?y ?z))
+
+;; With negation
+(rule 'can-fly
+  '(can-fly ?x)
+  '(bird ?x)
+  '(not (cannot-fly ?x)))
+
+;; With builtins
+(rule 'passed
+  '(passed ?x)
+  '(score ?x ?s)
+  '(>= ?s 75))
 ```
 
-## CSP Enforcement
+### Queries
 
+```lisp
+;; Simple query
+(query 'parent 'tom '?x)       ; Tom's children
+
+;; Conjunction
+(query-all '(parent ?x ?y) '(parent ?y ?z))
+
+;; CTL operators
+(eventually? '(state done))    ; EF
+(never? '(error ?x))           ; AG(not ...)
+(always? '(valid ?x))          ; AG
 ```
-You: "Enable strict CSP and check for violations"
 
-Claude uses:
-  1. csp_enforce enabled=true strict=true
-  2. run_simulation 100
-  3. csp_status
-  
-Claude: "No violations - all actors follow guard-first pattern"
+### Temporal Queries
+
+```lisp
+;; Events at specific time
+(query 'at-time 'event '?e 5)
+
+;; Events before/after time
+(query 'before 'event '?e 10)
+(query 'after 'event '?e 3)
+
+;; Events in time range
+(query 'between 'event '?e 2 8)
+```
+
+### CSP Verification via Datalog
+
+```lisp
+;; Define CSP violation rule
+(rule 'csp-violation
+  '(csp-violation ?actor ?var ?time)
+  '(effect ?actor set ?var)
+  '(not (guard-before ?actor)))
+
+;; Query violations
+(query 'csp-violation '?who '?what '?when)
+
+;; Deadlock detection
+(rule 'deadlock
+  '(deadlock ?a ?b)
+  '(waiting-for ?a ?b)
+  '(waiting-for ?b ?a))
+
+(query 'deadlock '?a '?b)
 ```
 
 ## Files
 
-- `main.go` - Full implementation with MCP
-- `breadco.lisp` - Multi-actor bakery simulation
-- `README-MCP.md` - This file
+| File | Description |
+|------|-------------|
+| `main.go` | Full BoundedLISP + MCP + CSP |
+| `datalog.go` | Datalog interpreter (~500 lines) |
+| `datalog_builtins.go` | LISP integration |
+| `datalog_test.go` | 25 Go tests |
+| `datalog-tests.lisp` | LISP integration tests |
+| `breadco.lisp` | Multi-actor simulation example |
+
+## Test Results
+
+```
+=== Test Count ===
+25 tests (37 including subtests)
+
+=== All Pass ===
+TestTermEquality, TestUnifyAtoms, TestUnifyVariables,
+TestUnifyLists, TestAssertAndQuery, TestRetract,
+TestSimpleRule, TestTransitiveRule, TestNegation,
+TestBuiltinComparison, TestTemporalAtTime, TestTemporalBefore,
+TestTemporalAfter, TestTemporalBetween, TestAlways,
+TestEventually, TestNever, TestCSPViolationDetection,
+TestMessageFlowTracking, TestDeadlockDetection,
+TestValueToTerm, TestTermToValue, TestBreadCoSimulation
+```
