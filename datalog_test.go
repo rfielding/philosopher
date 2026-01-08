@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -791,5 +792,130 @@ This implements the actor.`,
 				t.Errorf("cleanLispSection() =\n%q\nwant\n%q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestListFacts(t *testing.T) {
+	ev := NewEvaluator(1000)
+	
+	// Assert some facts via LISP
+	exprs := NewParser(`
+		(assert! 'sale 'store1 100)
+		(assert! 'sale 'store2 200)
+		(assert! 'inventory 'store1 50)
+	`).Parse()
+	for _, expr := range exprs {
+		ev.Eval(expr, ev.GlobalEnv)
+	}
+	
+	// List all facts
+	result := ev.Eval(NewParser(`(list-facts)`).Parse()[0], ev.GlobalEnv)
+	if result.Type != TypeList || len(result.List) != 3 {
+		t.Errorf("expected 3 facts, got %d: %v", len(result.List), result)
+	}
+	
+	// List filtered by predicate
+	result = ev.Eval(NewParser(`(list-facts 'sale)`).Parse()[0], ev.GlobalEnv)
+	if result.Type != TypeList || len(result.List) != 2 {
+		t.Errorf("expected 2 sale facts, got %d: %v", len(result.List), result)
+	}
+}
+
+func TestFactCount(t *testing.T) {
+	ev := NewEvaluator(1000)
+	
+	// Assert some facts via LISP
+	exprs := NewParser(`
+		(assert! 'sale 'store1 100)
+		(assert! 'sale 'store2 200)
+		(assert! 'inventory 'store1 50)
+	`).Parse()
+	for _, expr := range exprs {
+		ev.Eval(expr, ev.GlobalEnv)
+	}
+	
+	// Count all
+	result := ev.Eval(NewParser(`(fact-count)`).Parse()[0], ev.GlobalEnv)
+	if result.Number != 3 {
+		t.Errorf("expected 3 total facts, got %v", result.Number)
+	}
+	
+	// Count by predicate
+	result = ev.Eval(NewParser(`(fact-count 'sale)`).Parse()[0], ev.GlobalEnv)
+	if result.Number != 2 {
+		t.Errorf("expected 2 sale facts, got %v", result.Number)
+	}
+	
+	result = ev.Eval(NewParser(`(fact-count 'inventory)`).Parse()[0], ev.GlobalEnv)
+	if result.Number != 1 {
+		t.Errorf("expected 1 inventory fact, got %v", result.Number)
+	}
+}
+
+func TestToolSubstitution(t *testing.T) {
+	ev := NewEvaluator(1000)
+	
+	// Assert some facts via LISP
+	exprs := NewParser(`
+		(assert! 'sale 'store1 100)
+		(assert! 'sale 'store2 200)
+	`).Parse()
+	for _, expr := range exprs {
+		ev.Eval(expr, ev.GlobalEnv)
+	}
+	
+	tr := NewToolRegistry(ev)
+	
+	// Test facts_table substitution
+	input := "Here are the sales:\n\n{{facts_table predicate=\"sale\"}}"
+	output := tr.Process(input)
+	
+	if !strings.Contains(output, "sale") {
+		t.Errorf("expected output to contain facts table, got: %s", output)
+	}
+	if strings.Contains(output, "{{") {
+		t.Errorf("expected placeholders to be replaced, got: %s", output)
+	}
+	
+	// Test facts summary (no predicate)
+	input2 := "{{facts_table}}"
+	output2 := tr.Process(input2)
+	
+	if !strings.Contains(output2, "sale") || !strings.Contains(output2, "2") {
+		t.Errorf("expected summary with sale count, got: %s", output2)
+	}
+}
+
+func TestLispExecutionPopulatesFacts(t *testing.T) {
+	ev := NewEvaluator(1000)
+	
+	// Simulate what happens when LISP section is executed
+	lisp := `
+		(assert! 'sale 'store1 100)
+		(assert! 'sale 'store2 200)
+		(assert! 'inventory 'store1 50)
+	`
+	
+	parser := NewParser(lisp)
+	exprs := parser.Parse()
+	for _, expr := range exprs {
+		ev.Eval(expr, ev.GlobalEnv)
+	}
+	
+	// Now facts should exist
+	if len(ev.DatalogDB.Facts) != 3 {
+		t.Errorf("expected 3 facts after LISP execution, got %d", len(ev.DatalogDB.Facts))
+	}
+	
+	// Tool substitution should now show facts
+	tr := NewToolRegistry(ev)
+	output := tr.Process("{{facts_table}}")
+	
+	if strings.Contains(output, "No facts") || strings.Contains(output, "*No facts") {
+		t.Errorf("expected facts in output, got: %s", output)
+	}
+	
+	if !strings.Contains(output, "sale") {
+		t.Errorf("expected 'sale' in facts summary, got: %s", output)
 	}
 }

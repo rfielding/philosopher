@@ -2671,6 +2671,7 @@ type Session struct {
 	CreatedAt    time.Time
 	InputTokens  int
 	OutputTokens int
+	Evaluator    *Evaluator  // For LISP eval and Datalog facts
 	mu           sync.Mutex
 }
 
@@ -2705,6 +2706,7 @@ func getOrCreateSession(id string) *Session {
 		Versions:   []DocVersion{},
 		CurrentDoc: "",
 		CreatedAt:  time.Now(),
+		Evaluator:  NewEvaluator(1000),  // Per-session evaluator
 	}
 	sessions[id] = sess
 	return sess
@@ -2721,6 +2723,7 @@ func runServer(ev *Evaluator, port string) {
 	http.HandleFunc("/eval", handleEval(ev))
 	http.HandleFunc("/properties", handleProperties(ev))
 	http.HandleFunc("/diagram", handleDiagram(ev))
+	http.HandleFunc("/facts", handleFacts)  // Debug: show session facts
 	
 	// Check for API keys
 	hasAnthropic := os.Getenv("ANTHROPIC_API_KEY") != ""
@@ -2854,320 +2857,116 @@ func loadLispModules(ev *Evaluator) {
 	}
 }
 
-const systemPrompt = `You are a requirements engineer helping users specify multi-party protocols using BoundedLISP.
+const systemPrompt = `You are a requirements engineer helping users specify multi-party protocols.
 
-## CRITICAL: BoundedLISP Dialect
+## CRITICAL: What Users See
 
-BoundedLISP is NOT Scheme or Common Lisp. Key differences:
+Users see DIAGRAMS and TABLES, not code. Never show LISP or Datalog to users.
 
-### Truthiness (IMPORTANT!)
-Falsey: nil, false, '() (empty list), 0, ""
-Truthy: everything else
+## Tool Placeholders
 
-### Boolean literals
-Use: true, false, nil
-NOT: #t/#f (Scheme) or t/nil (CL)
+Use these in your MARKDOWN section - they render automatically:
 
-### Let syntax (DIFFERENT!)
-Simple let binds ONE variable:
-  (let x 5 (+ x 1))        ; => 6
+{{facts_table}}                          - summary of collected facts
+{{facts_table predicate="sale"}}         - facts for specific predicate
+{{property formula="AG(inv >= 0)"}}      - verification result
 
-NOT: (let ((x 5)) (+ x 1))  ; WRONG - Scheme syntax
+## Output Format
 
-For multiple bindings use let*:
-  (let* ((x 5) (y (+ x 1))) (* x y))
-
-### Define is ALWAYS GLOBAL
-For local helpers, use let + lambda:
-  (let helper (lambda (x) ...) (helper arg))
-
-### Lists
-(first lst), (rest lst), (nth lst i), (cons x lst)
-(empty? lst)  ; true for nil or '()
-
-## ═══════════════════════════════════════════════════════════════════════════
-## CRITICAL: CSP STATE PATTERN - EFFECTS ONLY IN TRANSITIONS
-## ═══════════════════════════════════════════════════════════════════════════
-
-### THE RULE
-Every set! MUST occur AFTER a blocking operation (receive!, send-to!).
-
-### CORRECT PATTERN
-` + "```lisp" + `
-(define (actor-loop x)
-  (let msg (receive!)           ; GUARD first
-    (set! count (+ count 1))    ; EFFECT after
-    (list 'become (list 'actor-loop (+ x 1)))))
-` + "```" + `
-
-## Your Output Format
-
-ALWAYS respond with exactly THREE sections. Each section starts with its marker on its own line.
+ALWAYS use THREE sections:
 
 ===CHAT===
-Brief conversational response (1-3 sentences). No code here.
+Brief response (1-3 sentences).
 
 ===MARKDOWN===
-Specification with diagrams, tables, explanations. All prose and mermaid goes here.
+Diagrams via mermaid fences, tool placeholders, English explanations.
+NEVER include LISP code blocks here.
 
 ===LISP===
-ONLY valid BoundedLISP code. NO markdown, NO prose, NO explanations, NO headers.
-The content must be directly parseable by the LISP interpreter.
-Do NOT include code fences - just raw LISP code.
-Do NOT include comments explaining what the code does - put explanations in ===MARKDOWN===.
+Internal code only - users don't see this section.
 
-CORRECT ===LISP=== section (just code):
+## ═══════════════════════════════════════════════════════════════════════════
+## VALID BOUNDEDLISP CONSTRUCTS (use ONLY these)
+## ═══════════════════════════════════════════════════════════════════════════
+
+### Core Forms
+(define name value)           ; global definition
+(define (fn x y) body)        ; function definition
+(let x 5 (+ x 1))             ; single binding
+(let* ((x 5) (y 6)) body)     ; multiple bindings
+(lambda (x) body)             ; anonymous function
+(if test then else)           ; conditional
+(cond (test1 expr1) ...)      ; multi-branch
+
+### Lists
+(list 1 2 3)                  ; create list
+(car lst) (cdr lst)           ; first / rest
+(cons x lst)                  ; prepend
+(nth lst i)                   ; index
+(empty? lst)                  ; check empty
+
+### Actors
+(spawn 'name '() '(initial-fn args))  ; create actor
+(receive!)                    ; blocking receive (MUST be first in loop)
+(send-to! 'actor msg)         ; send message
+
+### Facts (Datalog)
+(assert! 'predicate 'arg1 'arg2)      ; add fact
+(query 'predicate '?x '?y)            ; query facts
+(rule 'name '(head ?x) '(body ?x))    ; define rule
+
+### Temporal
+(never? '(bad-state ?x))      ; AG(not ...)
+(eventually? '(goal ?x))      ; EF(...)
+(always? '(invariant ?x))     ; AG(...)
+
+### NOT VALID (do not use these - they don't exist):
+state-machine, transition, define-rule, next-state, update, then, initial-state
+
+## Mermaid Syntax
+
+FORBIDDEN in labels (causes parse errors):
+- := (use '= instead)
+- >= <= != (use gte, lte, neq instead)
+
+## Example Response
+
+===CHAT===
+I've modeled a counter that tracks its value as facts.
+
+===MARKDOWN===
+## Counter State Machine
+
+` + "```mermaid" + `
+stateDiagram-v2
+    [*] --> Running
+    Running --> Running: recv inc, count '= count + 1
+    Running --> [*]: recv stop
+` + "```" + `
+
+## Collected Facts
+
+{{facts_table}}
 
 ===LISP===
-(define (counter-loop count)
+(define (counter-loop n)
   (let msg (receive!)
     (cond
-      ((eq? (car msg) 'inc)
-       (list 'become (list 'counter-loop (+ count 1))))
+      ((eq? msg 'inc)
+       (assert! 'counter-value (+ n 1))
+       (list 'become (list 'counter-loop (+ n 1))))
+      ((eq? msg 'stop)
+       (list 'halt))
       (else
-       (list 'become (list 'counter-loop count))))))
+       (list 'become (list 'counter-loop n))))))
 
 (spawn 'counter '() '(counter-loop 0))
 
-WRONG ===LISP=== section (has markdown - DO NOT DO THIS):
+(assert! 'counter-value 1)
+(assert! 'counter-value 2)
+(assert! 'counter-value 3)
+`
 
-===LISP===
-Here is the counter:
-(define (counter-loop count) ...)
-The counter receives messages...
-
-^ WRONG - prose in LISP section causes parse errors!
-
-## ═══════════════════════════════════════════════════════════════════════════
-## PROGRAM GRAPHS (EFSM) - REQUIRED FORMAT
-## ═══════════════════════════════════════════════════════════════════════════
-
-Use mermaid stateDiagram-v2 for visual structure, with transition tables for precise semantics.
-
-### ⚠️ CRITICAL MERMAID SYNTAX RULES ⚠️
-
-**THESE CHARACTERS BREAK MERMAID - NEVER USE IN LABELS:**
-
-❌ FORBIDDEN (causes parse error, NO escape works):
-- ':=' - NEVER use, causes parse error
-- '>=' - NEVER use, causes parse error
-- '<=' - NEVER use, causes parse error  
-- '!=' - NEVER use, causes parse error
-- '&&' or '||' - NEVER use
-
-✅ USE TLA+ STYLE INSTEAD:
-
-For assignments, use prime notation: x '= x + 1 (TLA+ style, means "x-next equals")
-
-| BAD (breaks) | GOOD (works) |
-|--------------|--------------|
-| x := x + 1 | x '= x + 1 |
-| count := 0 | count '= 0 |
-| inv := inv - qty | inv '= inv - qty |
-
-For comparisons, use words:
-
-| BAD (breaks) | GOOD (works) |
-|--------------|--------------|
-| x >= 5 | x gte 5 |
-| inv >= want | enough inv |
-| x != y | x neq y |
-
-**Keep labels under 30 chars. For complex semantics, use a TRANSITION TABLE.**
-
-### Correct Pattern: Simple Mermaid + Transition Table
-
-` + "```mermaid" + `
-stateDiagram-v2
-    [*] --> Idle
-    
-    Idle --> Recv: recv msg
-    Recv --> Idle: delivery
-    Recv --> Check: buy request
-    
-    Check --> Idle: enough stock
-    Check --> Idle: sold out
-    
-    note right of Idle
-        Vars: inventory, revenue
-    end note
-` + "```" + `
-
-**Transition Table (full semantics, use := or '= in tables):**
-
-| From | Guard | Action | To |
-|------|-------|--------|-----|
-| Idle | recv ?msg | — | Recv |
-| Recv | msg.cmd = delivery | inventory '= inventory + msg.qty | Idle |
-| Recv | msg.cmd = buy | customer '= msg.from; want '= msg.qty | Check |
-| Check | inventory gte want | sold '= want; inventory '= inventory - sold; send!(customer, sold) | Idle |
-| Check | inventory lt want | send!(customer, sold-out) | Idle |
-
-### Example: Counter Actor (TLA+ style in labels)
-
-` + "```mermaid" + `
-stateDiagram-v2
-    [*] --> Ready
-    
-    Ready --> Ready: recv inc, count '= count + 1
-    Ready --> Ready: recv dec, count '= count - 1
-    Ready --> Ready: recv get, send count
-    Ready --> [*]: recv stop
-    
-    note right of Ready
-        count: int
-    end note
-` + "```" + `
-
-### Example: BreadCo StoreFront
-
-` + "```mermaid" + `
-stateDiagram-v2
-    [*] --> Idle
-    
-    Idle --> Idle: delivery, inv '= inv + qty
-    Idle --> Serving: buy request
-    
-    Serving --> Idle: inv gte want, sell
-    Serving --> Idle: inv lt want, reject
-    
-    note right of Idle
-        inv, revenue: int
-    end note
-` + "```" + `
-
-| From | Guard | Action | To |
-|------|-------|--------|-----|
-| Idle | recv delivery(qty) | inv '= inv + qty | Idle |
-| Idle | recv buy(from, qty) | customer '= from; want '= qty | Serving |
-| Serving | inv gte want | sold '= want; inv '= inv - sold; send ack | Idle |
-| Serving | inv lt want | send sold-out | Idle |
-
-## Sequence Diagrams
-
-For message flows between actors:
-
-` + "```mermaid" + `
-sequenceDiagram
-    participant P as Production
-    participant T as Trucks
-    participant S as StoreFront
-    participant C as Customer
-    
-    P->>T: bread(qty)
-    T->>S: delivery(qty)
-    C->>S: buy(qty)
-    alt enough stock
-        S->>C: purchase(qty)
-    else sold out
-        S->>C: sold-out
-    end
-` + "```" + `
-
-## Metrics Charts (xychart)
-
-For time-series data from simulations:
-
-` + "```mermaid" + `
-xychart-beta
-    title "BreadCo 7-Day Metrics"
-    x-axis [D1, D2, D3, D4, D5, D6, D7]
-    y-axis "Units" 0 --> 100
-    line "Produced" [11, 23, 36, 50, 65, 81, 98]
-    line "Sold" [9, 18, 27, 36, 45, 54, 63]
-` + "```" + `
-
-Use xychart when showing:
-- Cumulative metrics over time
-- Comparison trends
-- Inventory/queue levels
-
-## Metrics Tracking Pattern
-
-` + "```lisp" + `
-;; In transitions (AFTER guard):
-(define (process-order)
-  (let msg (receive!)                    ; Guard
-    (let qty (nth msg 1)
-      (registry-set! 'total-sold 
-        (+ (registry-get 'total-sold) qty))
-      (list 'become '(process-order)))))
-` + "```" + `
-
-## Datalog for Fact Collection and Queries
-
-### What Datalog SUPPORTS:
-
-` + "```lisp" + `
-;; Assert facts
-(assert! 'sale 'store-a 'customer1 5)
-(assert-at! 100 'event 'start)  ; with timestamp
-
-;; Define rules (pattern matching only)
-(rule 'stockout
-  '(stockout ?store ?time)
-  '(inventory ?store 0 ?time))
-
-(rule 'deadlock
-  '(deadlock ?a ?b)
-  '(waiting-for ?a ?b)
-  '(waiting-for ?b ?a))
-
-;; Query facts
-(query 'sale '?store '?customer '?qty)
-(query 'stockout '?store '?time)
-
-;; Temporal checks
-(eventually? '(sale ?_ ?_ ?_))  ; EF - exists path where fact holds
-(never? '(deadlock ?_ ?_))      ; AG(not ...) - always globally not
-(always? '(inventory-positive)) ; AG - always globally
-` + "```" + `
-
-### What Datalog does NOT support:
-
-- NO aggregation (SUM, COUNT, AVG, MAX, MIN)
-- NO GROUP BY
-- NO sorting or ordering
-- NO arithmetic in rules (only pattern matching)
-
-WRONG (do not generate):
-` + "```" + `
-(rule 'top-revenue
-  '(top-revenue ?store ?total)
-  (aggregate ?total (+ ?sale-qty)    ; NOT SUPPORTED
-    (group-by ?store ...)))          ; NOT SUPPORTED
-` + "```" + `
-
-### For aggregation, use the registry:
-
-` + "```lisp" + `
-;; Track totals via registry, not Datalog
-(registry-set! 'total-sales 0)
-
-;; In actor, update registry
-(registry-set! 'total-sales (+ (registry-get 'total-sales) qty))
-
-;; Read final value
-(registry-get 'total-sales)
-` + "```" + `
-
-## CSP Compliance Checklist
-
-Before generating:
-1. ☐ Every state's first operation is receive! or send-to!
-2. ☐ All set!/assignments come AFTER the guard
-3. ☐ Program graph shows [guard] / action format
-4. ☐ Variables declared in notes
-5. ☐ Transitions are complete (guard + effect)
-
-## Guidelines
-
-- Program graphs show COMPLETE transition information
-- Guards in [brackets], actions after /
-- Include variable declarations in notes
-- Use xycharts for simulation metrics
-- Sequence diagrams for message protocols
-- Keep chat brief - diagrams tell the story`
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(indexHTML))
@@ -3239,6 +3038,19 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	
 	// Parse the structured response
 	chatResponse, markdown, lisp := parseStructuredResponse(response)
+	
+	// Execute LISP code to populate DatalogDB with facts
+	if lisp != "" {
+		parser := NewParser(lisp)
+		exprs := parser.Parse()
+		for _, expr := range exprs {
+			sess.Evaluator.Eval(expr, sess.Evaluator.GlobalEnv)
+		}
+	}
+	
+	// Process tool placeholders in markdown (AFTER executing LISP so facts exist)
+	toolRegistry := NewToolRegistry(sess.Evaluator)
+	markdown = toolRegistry.Process(markdown)
 	
 	// Store LISP as current doc
 	if lisp != "" {
@@ -3605,6 +3417,35 @@ func handleGetVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(sess.Versions[versionNum-1])
+}
+
+func handleFacts(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	sess := getOrCreateSession(sessionID)
+	
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Collect facts by predicate
+	factsByPred := make(map[string][]map[string]interface{})
+	for _, fact := range sess.Evaluator.DatalogDB.Facts {
+		args := make([]string, len(fact.Args))
+		for i, arg := range fact.Args {
+			args[i] = arg.String()
+		}
+		factsByPred[fact.Predicate] = append(factsByPred[fact.Predicate], map[string]interface{}{
+			"args": args,
+			"time": fact.Time,
+		})
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total_facts": len(sess.Evaluator.DatalogDB.Facts),
+		"by_predicate": factsByPred,
+		"rules": len(sess.Evaluator.DatalogDB.Rules),
+	})
 }
 
 func handleEval(ev *Evaluator) http.HandlerFunc {
@@ -5800,6 +5641,48 @@ func RegisterDatalogBuiltins(ev *Evaluator) {
 	env.Set("datalog-clear-rules!", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
 		ev.DatalogDB.ClearRules()
 		return Sym("ok")
+	}})
+
+	// (list-facts) - list all facts, optionally filtered by predicate
+	// (list-facts) - all facts
+	// (list-facts 'sale) - only 'sale' facts
+	env.Set("list-facts", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		var predFilter string
+		if len(args) > 0 && args[0].Type == TypeSymbol {
+			predFilter = args[0].Symbol
+		}
+		
+		var result []Value
+		for _, fact := range ev.DatalogDB.Facts {
+			if predFilter != "" && fact.Predicate != predFilter {
+				continue
+			}
+			// Convert fact to list: (predicate arg1 arg2 ...)
+			factList := make([]Value, len(fact.Args)+1)
+			factList[0] = Sym(fact.Predicate)
+			for i, arg := range fact.Args {
+				factList[i+1] = TermToValue(arg)
+			}
+			result = append(result, Lst(factList...))
+		}
+		return Lst(result...)
+	}})
+
+	// (fact-count) - count total facts
+	// (fact-count 'sale) - count facts with predicate
+	env.Set("fact-count", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		var predFilter string
+		if len(args) > 0 && args[0].Type == TypeSymbol {
+			predFilter = args[0].Symbol
+		}
+		
+		count := 0
+		for _, fact := range ev.DatalogDB.Facts {
+			if predFilter == "" || fact.Predicate == predFilter {
+				count++
+			}
+		}
+		return Num(float64(count))
 	}})
 
 	// (datalog-time! n)

@@ -188,7 +188,8 @@ func toolProperty(ev *Evaluator, args map[string]string) string {
 func toolFactsTable(ev *Evaluator, args map[string]string) string {
 	predicate := args["predicate"]
 	if predicate == "" {
-		return "<!-- facts_table: missing predicate arg -->"
+		// No predicate = show summary
+		return toolFactsSummary(ev, args)
 	}
 	
 	limit := 10 // default
@@ -224,6 +225,33 @@ func toolFactsTable(ev *Evaluator, args map[string]string) string {
 	if len(matchingFacts) > limit {
 		sb.WriteString(fmt.Sprintf("\n*...and %d more*\n", len(matchingFacts)-limit))
 	}
+	
+	return sb.String()
+}
+
+// toolFactsSummary shows counts by predicate
+func toolFactsSummary(ev *Evaluator, args map[string]string) string {
+	if len(ev.DatalogDB.Facts) == 0 {
+		return "*No facts collected yet*"
+	}
+	
+	// Count by predicate
+	counts := make(map[string]int)
+	for _, fact := range ev.DatalogDB.Facts {
+		counts[fact.Predicate]++
+	}
+	
+	var sb strings.Builder
+	sb.WriteString("| Predicate | Count |\n")
+	sb.WriteString("|-----------|-------|\n")
+	
+	total := 0
+	for pred, count := range counts {
+		sb.WriteString(fmt.Sprintf("| %s | %d |\n", pred, count))
+		total += count
+	}
+	
+	sb.WriteString(fmt.Sprintf("| **Total** | **%d** |\n", total))
 	
 	return sb.String()
 }
