@@ -256,16 +256,11 @@ func toolFactsSummary(ev *Evaluator, args map[string]string) string {
 	return sb.String()
 }
 
-// toolMetricsChart renders xychart from registry metrics
+// toolMetricsChart renders xychart from fact data
+// Usage: {{metrics_chart title="X" predicates="sent,received"}}
+// Or: {{metrics_chart title="X" predicate="sale" field="2"}}
 func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 	title := args["title"]
-	metrics := args["metrics"] // comma-separated registry keys
-	
-	if metrics == "" {
-		return "<!-- metrics_chart: missing metrics arg -->"
-	}
-	
-	metricList := strings.Split(metrics, ",")
 	
 	var sb strings.Builder
 	sb.WriteString("```mermaid\n")
@@ -274,15 +269,76 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 		sb.WriteString(fmt.Sprintf("    title \"%s\"\n", title))
 	}
 	
-	// TODO: Extract time series from registry or facts
-	// For now, placeholder
-	sb.WriteString("    x-axis [T1, T2, T3, T4, T5]\n")
-	sb.WriteString("    y-axis \"Value\" 0 --> 100\n")
+	// Get max time for x-axis
+	maxTime := int64(0)
+	for _, fact := range ev.DatalogDB.Facts {
+		if fact.Time > maxTime {
+			maxTime = fact.Time
+		}
+	}
 	
-	for _, m := range metricList {
-		m = strings.TrimSpace(m)
-		// Would query (metric-history m ?time ?value)
-		sb.WriteString(fmt.Sprintf("    line \"%s\" [10, 20, 30, 40, 50]\n", m))
+	if maxTime == 0 {
+		sb.WriteString("    x-axis [0]\n")
+		sb.WriteString("    y-axis \"Count\" 0 --> 10\n")
+		sb.WriteString("    line \"no data\" [0]\n")
+		sb.WriteString("```\n")
+		return sb.String()
+	}
+	
+	// Build x-axis labels
+	xLabels := make([]string, 0)
+	step := maxTime / 10
+	if step < 1 {
+		step = 1
+	}
+	for t := int64(0); t <= maxTime; t += step {
+		xLabels = append(xLabels, fmt.Sprintf("%d", t))
+	}
+	sb.WriteString(fmt.Sprintf("    x-axis [%s]\n", strings.Join(xLabels, ", ")))
+	
+	// Check for predicates to count over time
+	if predicates := args["predicates"]; predicates != "" {
+		predList := strings.Split(predicates, ",")
+		
+		maxY := 0
+		seriesData := make(map[string][]int)
+		
+		for _, pred := range predList {
+			pred = strings.TrimSpace(pred)
+			// Count facts per time bucket
+			counts := make([]int, len(xLabels))
+			cumulative := 0
+			
+			bucketIdx := 0
+			for t := int64(0); t <= maxTime && bucketIdx < len(counts); t += step {
+				// Count facts in this time range
+				for _, fact := range ev.DatalogDB.Facts {
+					if fact.Predicate == pred && fact.Time >= t && fact.Time < t+step {
+						cumulative++
+					}
+				}
+				counts[bucketIdx] = cumulative
+				if cumulative > maxY {
+					maxY = cumulative
+				}
+				bucketIdx++
+			}
+			seriesData[pred] = counts
+		}
+		
+		sb.WriteString(fmt.Sprintf("    y-axis \"Count\" 0 --> %d\n", maxY+10))
+		
+		for pred, counts := range seriesData {
+			countStrs := make([]string, len(counts))
+			for i, c := range counts {
+				countStrs[i] = fmt.Sprintf("%d", c)
+			}
+			sb.WriteString(fmt.Sprintf("    line \"%s\" [%s]\n", pred, strings.Join(countStrs, ", ")))
+		}
+	} else {
+		// Fallback: show counts of all predicates
+		sb.WriteString("    y-axis \"Count\" 0 --> 100\n")
+		sb.WriteString("    line \"facts\" [0]\n")
 	}
 	
 	sb.WriteString("```\n")

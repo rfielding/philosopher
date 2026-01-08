@@ -919,3 +919,155 @@ func TestLispExecutionPopulatesFacts(t *testing.T) {
 		t.Errorf("expected 'sale' in facts summary, got: %s", output)
 	}
 }
+
+func TestAutoTracing(t *testing.T) {
+	ev := NewEvaluator(1000)
+	
+	// Define and spawn actors that exchange messages
+	code := `
+		;; Simple ping-pong actors
+		(define (pinger n)
+		  (if (> n 0)
+			(begin
+			  (send-to! 'ponger (list 'ping n))
+			  (let reply (receive!)
+				(list 'become (list 'pinger (- n 1)))))
+			(done!)))
+		
+		(define (ponger)
+		  (let msg (receive!)
+			(send-to! 'pinger (list 'pong (nth msg 1)))
+			(list 'become '(ponger))))
+		
+		(spawn-actor 'pinger 10 '(pinger 3))
+		(spawn-actor 'ponger 10 '(ponger))
+		(run-scheduler 100)
+	`
+	
+	parser := NewParser(code)
+	exprs := parser.Parse()
+	for _, expr := range exprs {
+		ev.Eval(expr, ev.GlobalEnv)
+	}
+	
+	// Check that spawn facts were created
+	spawnCount := 0
+	for _, fact := range ev.DatalogDB.Facts {
+		if fact.Predicate == "spawned" {
+			spawnCount++
+		}
+	}
+	if spawnCount != 2 {
+		t.Errorf("expected 2 spawned facts, got %d", spawnCount)
+	}
+	
+	// Check that sent/received facts were created
+	sentCount := 0
+	receivedCount := 0
+	for _, fact := range ev.DatalogDB.Facts {
+		if fact.Predicate == "sent" {
+			sentCount++
+		}
+		if fact.Predicate == "received" {
+			receivedCount++
+		}
+	}
+	
+	if sentCount < 3 {
+		t.Errorf("expected at least 3 sent facts (pings), got %d", sentCount)
+	}
+	if receivedCount < 3 {
+		t.Errorf("expected at least 3 received facts, got %d", receivedCount)
+	}
+	
+	// Verify we can query these facts
+	tr := NewToolRegistry(ev)
+	output := tr.Process("{{facts_table}}")
+	
+	if !strings.Contains(output, "sent") {
+		t.Errorf("expected 'sent' in facts summary, got: %s", output)
+	}
+	if !strings.Contains(output, "received") {
+		t.Errorf("expected 'received' in facts summary, got: %s", output)
+	}
+}
+
+func TestAggregationFunctions(t *testing.T) {
+	ev := NewEvaluator(1000)
+	
+	// Add some facts with numeric values
+	code := `
+		(assert! 'sale 'store1 100)
+		(assert! 'sale 'store2 200)
+		(assert! 'sale 'store1 150)
+		(assert! 'sale 'store2 250)
+	`
+	parser := NewParser(code)
+	for _, expr := range parser.Parse() {
+		ev.Eval(expr, ev.GlobalEnv)
+	}
+	
+	// Test sum-facts (sum field at index 1)
+	result := ev.Eval(NewParser(`(sum-facts 'sale 1)`).Parse()[0], ev.GlobalEnv)
+	if result.Number != 700 {
+		t.Errorf("expected sum 700, got %v", result.Number)
+	}
+	
+	// Test max-facts
+	result = ev.Eval(NewParser(`(max-facts 'sale 1)`).Parse()[0], ev.GlobalEnv)
+	if result.Number != 250 {
+		t.Errorf("expected max 250, got %v", result.Number)
+	}
+	
+	// Test group-count (count by store - field 0)
+	result = ev.Eval(NewParser(`(group-count 'sale 0)`).Parse()[0], ev.GlobalEnv)
+	if result.Type != TypeList || len(result.List) != 2 {
+		t.Errorf("expected 2 groups, got %v", result)
+	}
+	
+	// Test group-sum (sum by store)
+	result = ev.Eval(NewParser(`(group-sum 'sale 0 1)`).Parse()[0], ev.GlobalEnv)
+	if result.Type != TypeList || len(result.List) != 2 {
+		t.Errorf("expected 2 groups, got %v", result)
+	}
+}
+
+func TestStateChangeTracing(t *testing.T) {
+	ev := NewEvaluator(1000)
+	
+	// Define actors that change state
+	code := `
+		(define (state-a)
+		  (let msg (receive!)
+			(list 'become '(state-b))))
+		
+		(define (state-b)
+		  (let msg (receive!)
+			(list 'become '(state-c))))
+		
+		(define (state-c)
+		  (done!))
+		
+		(spawn-actor 'fsm 10 '(state-a))
+		(send-to! 'fsm 'go)
+		(send-to! 'fsm 'go)
+		(run-scheduler 20)
+	`
+	
+	parser := NewParser(code)
+	for _, expr := range parser.Parse() {
+		ev.Eval(expr, ev.GlobalEnv)
+	}
+	
+	// Check for state-change facts
+	stateChanges := 0
+	for _, fact := range ev.DatalogDB.Facts {
+		if fact.Predicate == "state-change" {
+			stateChanges++
+		}
+	}
+	
+	if stateChanges < 2 {
+		t.Errorf("expected at least 2 state-change facts, got %d", stateChanges)
+	}
+}

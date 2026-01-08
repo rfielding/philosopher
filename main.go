@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -744,6 +745,8 @@ func (ev *Evaluator) setupBuiltins() {
 
 	// Comparison
 	env.Set("=", Value{Type: TypeBuiltin, Builtin: builtinEq})
+	env.Set("eq?", Value{Type: TypeBuiltin, Builtin: builtinEq})     // alias
+	env.Set("equals", Value{Type: TypeBuiltin, Builtin: builtinEq})  // alias
 	env.Set("!=", Value{Type: TypeBuiltin, Builtin: builtinNeq})
 	env.Set("<", Value{Type: TypeBuiltin, Builtin: builtinLt})
 	env.Set("<=", Value{Type: TypeBuiltin, Builtin: builtinLte})
@@ -758,6 +761,8 @@ func (ev *Evaluator) setupBuiltins() {
 	// List operations
 	env.Set("first", Value{Type: TypeBuiltin, Builtin: builtinFirst})
 	env.Set("rest", Value{Type: TypeBuiltin, Builtin: builtinRest})
+	env.Set("car", Value{Type: TypeBuiltin, Builtin: builtinFirst})  // alias
+	env.Set("cdr", Value{Type: TypeBuiltin, Builtin: builtinRest})   // alias
 	env.Set("cons", Value{Type: TypeBuiltin, Builtin: builtinCons})
 	env.Set("append", Value{Type: TypeBuiltin, Builtin: builtinAppend})
 	env.Set("list", Value{Type: TypeBuiltin, Builtin: builtinList})
@@ -2196,6 +2201,9 @@ func builtinSpawnActor(ev *Evaluator, args []Value, env *Env) Value {
 	
 	ev.Scheduler.AddActor(name, mailboxSize, actorEnv, body)
 	
+	// AUTO-TRACE: log the spawn as a fact
+	ev.DatalogDB.AssertAtTime("spawned", ev.Scheduler.StepCount, Atom(name))
+	
 	return ActorVal(name)
 }
 
@@ -2210,6 +2218,7 @@ func builtinSelf(ev *Evaluator, args []Value, env *Env) Value {
 // (send-to! actor-name message)
 // Sends a message to the named actor's mailbox
 // Blocks if mailbox is full
+// AUTO-TRACES: asserts (sent from to msg time) fact
 func builtinSendTo(ev *Evaluator, args []Value, env *Env) Value {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "send-to!: need actor-name and message")
@@ -2238,6 +2247,14 @@ func builtinSendTo(ev *Evaluator, args []Value, env *Env) Value {
 	message := args[1]
 	
 	if target.Mailbox.SendNow(message) {
+		// AUTO-TRACE: log the send as a fact
+		sender := ev.Scheduler.CurrentActor
+		if sender == "" {
+			sender = "external"
+		}
+		ev.DatalogDB.AssertAtTime("sent", ev.Scheduler.StepCount,
+			Atom(sender), Atom(targetName), ValueToTerm(message))
+		
 		// Message sent successfully
 		// If target was blocked on receive, unblock it
 		if target.State == ActorBlocked && strings.HasPrefix(target.BlockedOn, "recv") {
@@ -2255,6 +2272,7 @@ func builtinSendTo(ev *Evaluator, args []Value, env *Env) Value {
 }
 
 // (receive!) - receive from own mailbox, blocks if empty
+// AUTO-TRACES: asserts (received actor msg time) fact
 func builtinReceive(ev *Evaluator, args []Value, env *Env) Value {
     ev.markGuardSeen() // CSP: mark guard seen
 	if ev.Scheduler.CurrentActor == "" {
@@ -2268,6 +2286,9 @@ func builtinReceive(ev *Evaluator, args []Value, env *Env) Value {
 	}
 	
 	if msg, ok := actor.Mailbox.RecvNow(); ok {
+		// AUTO-TRACE: log the receive as a fact
+		ev.DatalogDB.AssertAtTime("received", ev.Scheduler.StepCount,
+			Atom(ev.Scheduler.CurrentActor), ValueToTerm(msg))
 		return msg
 	} else {
 		// Mailbox empty, block
@@ -2413,6 +2434,14 @@ func builtinRunScheduler(ev *Evaluator, args []Value, env *Env) Value {
 		} else if result.IsList() && len(result.List) >= 2 {
 			// Check for (next-state new-code) or (become new-code)
 			if result.List[0].IsSymbol() && result.List[0].Symbol == "become" {
+				// AUTO-TRACE: log state change
+				oldState := extractStateName(actor.Code)
+				newState := extractStateName(result.List[1])
+				if oldState != newState {
+					ev.DatalogDB.AssertAtTime("state-change", ev.Scheduler.StepCount,
+						Atom(actor.Name), Atom(oldState), Atom(newState))
+				}
+				
 				// Change actor's code
 				actor.Code = result.List[1]
 				if ev.Scheduler.Trace {
@@ -2429,6 +2458,22 @@ func builtinRunScheduler(ev *Evaluator, args []Value, env *Env) Value {
 	}
 	
 	return Lst(Sym("max-steps"), Num(float64(ev.Scheduler.StepCount)))
+}
+
+// extractStateName gets the function name from a code expression
+// (counter-loop 5) → "counter-loop"
+// (idle) → "idle"
+// 'done → "done"
+func extractStateName(code Value) string {
+	if code.Type == TypeSymbol {
+		return code.Symbol
+	}
+	if code.IsList() && len(code.List) > 0 {
+		if code.List[0].Type == TypeSymbol {
+			return code.List[0].Symbol
+		}
+	}
+	return "unknown"
 }
 
 // Try to unblock actors that can now proceed
@@ -2867,9 +2912,10 @@ Users see DIAGRAMS and TABLES, not code. Never show LISP or Datalog to users.
 
 Use these in your MARKDOWN section - they render automatically:
 
-{{facts_table}}                          - summary of collected facts
-{{facts_table predicate="sale"}}         - facts for specific predicate
-{{property formula="AG(inv >= 0)"}}      - verification result
+{{facts_table}}                                    - summary of all facts by predicate  
+{{facts_table predicate="sale"}}                   - facts for specific predicate
+{{property formula="AG(inv >= 0)"}}                - verification result
+{{metrics_chart title="X" predicates="sent,received"}}  - cumulative chart over time
 
 ## Output Format
 
@@ -2905,23 +2951,51 @@ Internal code only - users don't see this section.
 (nth lst i)                   ; index
 (empty? lst)                  ; check empty
 
-### Actors
-(spawn 'name '() '(initial-fn args))  ; create actor
-(receive!)                    ; blocking receive (MUST be first in loop)
-(send-to! 'actor msg)         ; send message
+### Actors - CRITICAL PATTERN
 
-### Facts (Datalog)
-(assert! 'predicate 'arg1 'arg2)      ; add fact
+Actor loops MUST use (list 'become ...) to continue, NOT recursion!
+
+CORRECT pattern:
+(define (my-actor state)
+  (let msg (receive!)                    ; ALWAYS receive first
+    (cond
+      ((eq? (nth msg 0) 'do-x)           ; use eq? for comparison
+       (send-to! 'other (list 'response))
+       (list 'become (list 'my-actor (+ state 1))))  ; MUST use become
+      (else
+       (list 'become (list 'my-actor state))))))
+
+WRONG patterns (do NOT use):
+  (loop)                    ; NO - don't use recursion, use (list 'become ...)
+  (recur)                   ; NO - use (list 'become ...)
+
+REQUIRED to run simulation:
+(spawn-actor 'name 10 '(fn args))   ; spawn each actor
+(run-scheduler 100)                  ; run the simulation!
+
+### Auto-Tracing (happens automatically!)
+Every spawn/send/receive creates facts:
+  (spawned actor-name time)
+  (sent from to msg time)
+  (received actor msg time)
+  (state-change actor old-state new-state time)
+
+### Facts (Datalog) - Simple patterns only!
+(assert! 'predicate 'arg1 'arg2)      ; add custom fact
 (query 'predicate '?x '?y)            ; query facts
-(rule 'name '(head ?x) '(body ?x))    ; define rule
+
+Datalog does NOT support: not, negation, aggregation, arithmetic in rules
 
 ### Temporal
 (never? '(bad-state ?x))      ; AG(not ...)
 (eventually? '(goal ?x))      ; EF(...)
 (always? '(invariant ?x))     ; AG(...)
 
-### NOT VALID (do not use these - they don't exist):
-state-machine, transition, define-rule, next-state, update, then, initial-state
+### NOT VALID (these don't exist - never use them):
+- state-machine, transition, next-state, initial-state
+- loop, recur (use (list 'become ...) instead)
+- rule with 'not' or negation (Datalog doesn't support negation)
+- define-rule (use rule)
 
 ## Mermaid Syntax
 
@@ -2932,39 +3006,45 @@ FORBIDDEN in labels (causes parse errors):
 ## Example Response
 
 ===CHAT===
-I've modeled a counter that tracks its value as facts.
+I've modeled a producer-consumer simulation with message tracing.
 
 ===MARKDOWN===
-## Counter State Machine
+## Actor State Machines
 
 ` + "```mermaid" + `
 stateDiagram-v2
-    [*] --> Running
-    Running --> Running: recv inc, count '= count + 1
-    Running --> [*]: recv stop
+    [*] --> Producing
+    Producing --> Producing: produce, send to consumer
+    Producing --> [*]: done after 5 items
 ` + "```" + `
 
-## Collected Facts
+## Message Traffic Over Time
+
+{{metrics_chart title="Producer-Consumer Traffic" predicates="sent,received"}}
+
+## Collected Facts (auto-traced)
 
 {{facts_table}}
 
 ===LISP===
-(define (counter-loop n)
+;; Producer sends 5 items to consumer
+(define (producer n)
+  (if (> n 0)
+    (begin
+      (send-to! 'consumer (list 'item n))
+      (list 'become (list 'producer (- n 1))))
+    (done!)))
+
+;; Consumer receives and acknowledges
+(define (consumer)
   (let msg (receive!)
-    (cond
-      ((eq? msg 'inc)
-       (assert! 'counter-value (+ n 1))
-       (list 'become (list 'counter-loop (+ n 1))))
-      ((eq? msg 'stop)
-       (list 'halt))
-      (else
-       (list 'become (list 'counter-loop n))))))
+    (assert! 'processed (nth msg 1))
+    (list 'become '(consumer))))
 
-(spawn 'counter '() '(counter-loop 0))
-
-(assert! 'counter-value 1)
-(assert! 'counter-value 2)
-(assert! 'counter-value 3)
+;; Spawn actors and run simulation
+(spawn-actor 'producer 10 '(producer 5))
+(spawn-actor 'consumer 10 '(consumer))
+(run-scheduler 50)
 `
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -5355,18 +5435,27 @@ func (db *DatalogDB) solveBetween(goal Goal, rest []Goal, bindings Binding, dept
 // Temporal Operators (CTL-style)
 // ============================================================================
 
-// Always checks if a goal holds for all times in the trace
+// Always checks if a goal holds for all times in the trace (AG)
 func (db *DatalogDB) Always(goal Goal) bool {
-	// Get all unique times
+	// Get all unique times from facts
 	times := make(map[int64]bool)
 	for _, f := range db.Facts {
 		times[f.Time] = true
 	}
 
+	if len(times) == 0 {
+		return true // vacuously true
+	}
+
 	for t := range times {
-		// Check if goal holds at time t
-		db.TimeNow = t
-		results := db.solve([]Goal{goal}, make(Binding), 0)
+		// Create at-time wrapped goal: (at-time pred args... time)
+		atTimeArgs := append([]Term{Atom(goal.Predicate)}, goal.Args...)
+		atTimeArgs = append(atTimeArgs, NumTerm(float64(t)))
+		atTimeGoal := Goal{
+			Predicate: "at-time",
+			Args:      atTimeArgs,
+		}
+		results := db.solve([]Goal{atTimeGoal}, make(Binding), 0)
 		if len(results) == 0 {
 			return false
 		}
@@ -5683,6 +5772,178 @@ func RegisterDatalogBuiltins(ev *Evaluator) {
 			}
 		}
 		return Num(float64(count))
+	}})
+
+	// (sum-facts 'predicate field-index) - sum numeric values at field position
+	// (sum-facts 'sent 2) - sum the 3rd field (0-indexed) of all 'sent' facts
+	env.Set("sum-facts", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 2 {
+			return Num(0)
+		}
+		predFilter := ""
+		if args[0].Type == TypeSymbol {
+			predFilter = args[0].Symbol
+		}
+		fieldIdx := 0
+		if args[1].Type == TypeNumber {
+			fieldIdx = int(args[1].Number)
+		}
+		
+		sum := 0.0
+		for _, fact := range ev.DatalogDB.Facts {
+			if predFilter != "" && fact.Predicate != predFilter {
+				continue
+			}
+			if fieldIdx < len(fact.Args) && fact.Args[fieldIdx].IsNum {
+				sum += fact.Args[fieldIdx].Num
+			}
+		}
+		return Num(sum)
+	}})
+
+	// (max-facts 'predicate field-index) - max numeric value at field position
+	env.Set("max-facts", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 2 {
+			return Num(0)
+		}
+		predFilter := ""
+		if args[0].Type == TypeSymbol {
+			predFilter = args[0].Symbol
+		}
+		fieldIdx := 0
+		if args[1].Type == TypeNumber {
+			fieldIdx = int(args[1].Number)
+		}
+		
+		max := 0.0
+		first := true
+		for _, fact := range ev.DatalogDB.Facts {
+			if predFilter != "" && fact.Predicate != predFilter {
+				continue
+			}
+			if fieldIdx < len(fact.Args) && fact.Args[fieldIdx].IsNum {
+				if first || fact.Args[fieldIdx].Num > max {
+					max = fact.Args[fieldIdx].Num
+					first = false
+				}
+			}
+		}
+		return Num(max)
+	}})
+
+	// (timeseries 'predicate value-index) - get [(time value) ...] for charts
+	// Returns list of (time value) pairs sorted by time
+	env.Set("timeseries", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 2 {
+			return Lst()
+		}
+		predFilter := ""
+		if args[0].Type == TypeSymbol {
+			predFilter = args[0].Symbol
+		}
+		valueIdx := 0
+		if args[1].Type == TypeNumber {
+			valueIdx = int(args[1].Number)
+		}
+		
+		// Collect (time, value) pairs
+		type point struct {
+			time  int64
+			value float64
+		}
+		points := []point{}
+		
+		for _, fact := range ev.DatalogDB.Facts {
+			if predFilter != "" && fact.Predicate != predFilter {
+				continue
+			}
+			if valueIdx < len(fact.Args) && fact.Args[valueIdx].IsNum {
+				points = append(points, point{time: fact.Time, value: fact.Args[valueIdx].Num})
+			}
+		}
+		
+		// Sort by time
+		sort.Slice(points, func(i, j int) bool {
+			return points[i].time < points[j].time
+		})
+		
+		// Convert to list of (time value) pairs
+		result := make([]Value, len(points))
+		for i, p := range points {
+			result[i] = Lst(Num(float64(p.time)), Num(p.value))
+		}
+		return Lst(result...)
+	}})
+
+	// (group-count 'predicate field-index) - count by group
+	// Returns ((group1 count1) (group2 count2) ...)
+	env.Set("group-count", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 2 {
+			return Lst()
+		}
+		predFilter := ""
+		if args[0].Type == TypeSymbol {
+			predFilter = args[0].Symbol
+		}
+		fieldIdx := 0
+		if args[1].Type == TypeNumber {
+			fieldIdx = int(args[1].Number)
+		}
+		
+		counts := make(map[string]int)
+		for _, fact := range ev.DatalogDB.Facts {
+			if predFilter != "" && fact.Predicate != predFilter {
+				continue
+			}
+			if fieldIdx < len(fact.Args) {
+				key := fact.Args[fieldIdx].String()
+				counts[key]++
+			}
+		}
+		
+		result := make([]Value, 0, len(counts))
+		for k, v := range counts {
+			result = append(result, Lst(Str(k), Num(float64(v))))
+		}
+		return Lst(result...)
+	}})
+
+	// (group-sum 'predicate group-field-index value-field-index) - sum by group
+	env.Set("group-sum", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 3 {
+			return Lst()
+		}
+		predFilter := ""
+		if args[0].Type == TypeSymbol {
+			predFilter = args[0].Symbol
+		}
+		groupIdx := 0
+		if args[1].Type == TypeNumber {
+			groupIdx = int(args[1].Number)
+		}
+		valueIdx := 0
+		if args[2].Type == TypeNumber {
+			valueIdx = int(args[2].Number)
+		}
+		
+		sums := make(map[string]float64)
+		for _, fact := range ev.DatalogDB.Facts {
+			if predFilter != "" && fact.Predicate != predFilter {
+				continue
+			}
+			if groupIdx < len(fact.Args) && valueIdx < len(fact.Args) {
+				key := fact.Args[groupIdx].String()
+				if fact.Args[valueIdx].IsNum {
+					sums[key] += fact.Args[valueIdx].Num
+				}
+			}
+		}
+		
+		result := make([]Value, 0, len(sums))
+		for k, v := range sums {
+			result = append(result, Lst(Str(k), Num(v)))
+		}
+		return Lst(result...)
 	}})
 
 	// (datalog-time! n)
