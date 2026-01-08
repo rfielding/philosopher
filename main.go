@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"sort"
@@ -742,6 +743,12 @@ func (ev *Evaluator) setupBuiltins() {
 	env.Set("abs", Value{Type: TypeBuiltin, Builtin: builtinAbs})
 	env.Set("min", Value{Type: TypeBuiltin, Builtin: builtinMin})
 	env.Set("max", Value{Type: TypeBuiltin, Builtin: builtinMax})
+	env.Set("rand", Value{Type: TypeBuiltin, Builtin: builtinRand})
+	env.Set("random", Value{Type: TypeBuiltin, Builtin: builtinRand}) // alias
+
+	// String functions
+	env.Set("concat", Value{Type: TypeBuiltin, Builtin: builtinConcat})
+	env.Set("str", Value{Type: TypeBuiltin, Builtin: builtinStr})
 
 	// Comparison
 	env.Set("=", Value{Type: TypeBuiltin, Builtin: builtinEq})
@@ -1496,6 +1503,64 @@ func builtinMax(ev *Evaluator, args []Value, env *Env) Value {
 	return Num(max)
 }
 
+func builtinRand(ev *Evaluator, args []Value, env *Env) Value {
+	// (rand) -> random float [0, 1)
+	// (rand n) -> random int [0, n)
+	if len(args) == 0 {
+		return Num(rand.Float64())
+	}
+	if args[0].Type == TypeNumber {
+		n := int(args[0].Number)
+		if n <= 0 {
+			return Num(0)
+		}
+		return Num(float64(rand.Intn(n)))
+	}
+	return Num(rand.Float64())
+}
+
+func builtinConcat(ev *Evaluator, args []Value, env *Env) Value {
+	var sb strings.Builder
+	for _, a := range args {
+		sb.WriteString(valueToString(a))
+	}
+	return Str(sb.String())
+}
+
+func builtinStr(ev *Evaluator, args []Value, env *Env) Value {
+	if len(args) == 0 {
+		return Str("")
+	}
+	return Str(valueToString(args[0]))
+}
+
+func valueToString(v Value) string {
+	switch v.Type {
+	case TypeString:
+		return v.Str
+	case TypeNumber:
+		if v.Number == float64(int(v.Number)) {
+			return strconv.Itoa(int(v.Number))
+		}
+		return strconv.FormatFloat(v.Number, 'f', -1, 64)
+	case TypeSymbol:
+		return v.Symbol
+	case TypeBool:
+		if v.Bool {
+			return "true"
+		}
+		return "false"
+	case TypeList:
+		var parts []string
+		for _, elem := range v.List {
+			parts = append(parts, valueToString(elem))
+		}
+		return "(" + strings.Join(parts, " ") + ")"
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 func builtinEq(ev *Evaluator, args []Value, env *Env) Value {
 	if len(args) < 2 {
 		return Bool(true)
@@ -1914,14 +1979,12 @@ func builtinPrint(ev *Evaluator, args []Value, env *Env) Value {
 			parts[i] = a.String()
 		}
 	}
-	fmt.Print(strings.Join(parts, " "))
+	fmt.Println(strings.Join(parts, " "))
 	return Nil()
 }
 
 func builtinPrintln(ev *Evaluator, args []Value, env *Env) Value {
-	builtinPrint(ev, args, env)
-	fmt.Println()
-	return Nil()
+	return builtinPrint(ev, args, env) // same as print now
 }
 
 func builtinRepr(ev *Evaluator, args []Value, env *Env) Value {
@@ -2654,7 +2717,6 @@ func runREPL(ev *Evaluator) {
 }
 
 func runFile(ev *Evaluator, filename string) {
-	// LLM: we need to not start the web server with a web file, and consume the whole input as one prompt; not a thousand one line prompts.
 	content, err := os.ReadFile(filename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
@@ -2668,6 +2730,111 @@ func runFile(ev *Evaluator, filename string) {
 		result := ev.Eval(expr, nil)
 		if result.Type == TypeBlocked {
 			fmt.Fprintf(os.Stderr, "Blocked: %v\n", result.Blocked.Reason)
+		}
+	}
+}
+
+func runPrompt(ev *Evaluator, promptArg string) {
+	// Check if argument is a file or a prompt string
+	var prompt string
+	if content, err := os.ReadFile(promptArg); err == nil {
+		prompt = string(content)
+	} else {
+		prompt = promptArg
+	}
+
+	// Get API key - try Anthropic first, then OpenAI, then Gemini
+	provider := os.Getenv("LLM_PROVIDER")
+	var apiKey string
+	
+	switch provider {
+	case "openai":
+		apiKey = os.Getenv("OPENAI_API_KEY")
+	case "gemini":
+		apiKey = os.Getenv("GEMINI_API_KEY")
+	default:
+		provider = "anthropic"
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	
+	if apiKey == "" {
+		// Try to find any available key
+		if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
+			apiKey = k
+			provider = "anthropic"
+		} else if k := os.Getenv("OPENAI_API_KEY"); k != "" {
+			apiKey = k
+			provider = "openai"
+		} else if k := os.Getenv("GEMINI_API_KEY"); k != "" {
+			apiKey = k
+			provider = "gemini"
+		} else {
+			fmt.Fprintln(os.Stderr, "No API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY")
+			os.Exit(1)
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "Using %s...\n", provider)
+
+	// Create message list
+	messages := []ChatMessage{{Role: "user", Content: prompt}}
+
+	// Call LLM
+	var response string
+	var err error
+
+	switch provider {
+	case "openai":
+		response, _, _, err = callOpenAI(apiKey, messages)
+	case "gemini":
+		response, _, _, err = callGemini(apiKey, messages)
+	default:
+		response, _, _, err = callAnthropic(apiKey, messages)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "LLM error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Parse structured response
+	chatResponse, markdown, lisp := parseStructuredResponse(response)
+
+	// Execute LISP code
+	if lisp != "" {
+		fmt.Fprintln(os.Stderr, "\n=== Executing LISP ===")
+		parser := NewParser(lisp)
+		exprs := parser.Parse()
+		for _, expr := range exprs {
+			ev.Eval(expr, ev.GlobalEnv)
+		}
+	}
+
+	// Process tool placeholders
+	toolRegistry := NewToolRegistry(ev)
+	markdown = toolRegistry.Process(markdown)
+
+	// Output results
+	fmt.Println("\n===CHAT===")
+	fmt.Println(chatResponse)
+	
+	fmt.Println("\n===MARKDOWN===")
+	fmt.Println(markdown)
+	
+	if lisp != "" {
+		fmt.Println("\n===LISP===")
+		fmt.Println(lisp)
+	}
+
+	// Print fact summary
+	if len(ev.DatalogDB.Facts) > 0 {
+		fmt.Fprintf(os.Stderr, "\n=== Facts: %d ===\n", len(ev.DatalogDB.Facts))
+		counts := make(map[string]int)
+		for _, f := range ev.DatalogDB.Facts {
+			counts[f.Predicate]++
+		}
+		for pred, count := range counts {
+			fmt.Fprintf(os.Stderr, "  %s: %d\n", pred, count)
 		}
 	}
 }
@@ -2689,6 +2856,15 @@ func main() {
 			return
 		case "-repl":
 			runREPL(ev)
+			return
+		case "-prompt", "prompt":
+			if len(os.Args) < 3 {
+				fmt.Println("Usage: philosopher -prompt <prompt-text-or-file>")
+				fmt.Println("       philosopher -prompt prompts/test-01-counter.md")
+				fmt.Println("       philosopher -prompt \"Build a counter actor\"")
+				os.Exit(1)
+			}
+			runPrompt(ev, os.Args[2])
 			return
 		default:
 			// File mode - run a .lisp file
@@ -3897,8 +4073,8 @@ const indexHTML = `<!DOCTYPE html>
             <span class="spacer"></span>
             <span id="usage" class="usage" title="Session token usage"></span>
             <select id="provider">
-                <option value="openai">GPT-4</option>
                 <option value="anthropic">Claude</option>
+                <option value="openai">GPT-4</option>
                 <option value="gemini">Gemini</option>
             </select>
         </div>
