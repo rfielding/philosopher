@@ -2654,6 +2654,7 @@ func runREPL(ev *Evaluator) {
 }
 
 func runFile(ev *Evaluator, filename string) {
+	// LLM: we need to not start the web server with a web file, and consume the whole input as one prompt; not a thousand one line prompts.
 	content, err := os.ReadFile(filename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
@@ -3896,8 +3897,8 @@ const indexHTML = `<!DOCTYPE html>
             <span class="spacer"></span>
             <span id="usage" class="usage" title="Session token usage"></span>
             <select id="provider">
-                <option value="anthropic">Claude</option>
                 <option value="openai">GPT-4</option>
+                <option value="anthropic">Claude</option>
                 <option value="gemini">Gemini</option>
             </select>
         </div>
