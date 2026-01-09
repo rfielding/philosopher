@@ -2831,6 +2831,9 @@ func runPrompt(ev *Evaluator, promptArg string) {
 	// Process tool placeholders
 	toolRegistry := NewToolRegistry(ev)
 	markdown = toolRegistry.Process(markdown)
+	
+	// Add deterministic dashboard
+	markdown += generateDashboard(ev)
 
 	// Output results
 	fmt.Println("\n===CHAT===")
@@ -2930,6 +2933,7 @@ type DocVersion struct {
 var (
 	sessions   = make(map[string]*Session)
 	sessionsMu sync.RWMutex
+	globalEv   *Evaluator  // Single shared evaluator - no per-session state needed yet
 )
 
 func getOrCreateSession(id string) *Session {
@@ -2953,6 +2957,9 @@ func getOrCreateSession(id string) *Session {
 }
 
 func runServer(ev *Evaluator, port string) {
+	// Set the global evaluator
+	globalEv = ev
+	
 	// Load LISP modules
 	loadLispModules(ev)
 	
@@ -2960,8 +2967,8 @@ func runServer(ev *Evaluator, port string) {
 	http.HandleFunc("/chat", handleChat)
 	http.HandleFunc("/versions", handleVersions)
 	http.HandleFunc("/version/", handleGetVersion)
-	http.HandleFunc("/eval", handleEval(sessions))
-	http.HandleFunc("/properties", handleProperties(sessions))
+	http.HandleFunc("/eval", handleEval)
+	http.HandleFunc("/properties", handleProperties)
 	http.HandleFunc("/diagram", handleDiagram(ev))
 	http.HandleFunc("/facts", handleFacts)  // Debug: show session facts
 	
@@ -3101,39 +3108,10 @@ const systemPrompt = `You are a requirements engineer helping users specify mult
 
 ## CRITICAL RULES
 
-1. Users see DIAGRAMS and TABLES, not code
-2. NEVER put LISP code OR Datalog rules in the MARKDOWN section
-3. ALWAYS use tool placeholders for facts and charts (they render automatically)
-4. ALWAYS run a simulation with actual message passing to populate charts
-
-## Tool Placeholders (REQUIRED for showing data)
-
-In your MARKDOWN section, use these EXACTLY - they get replaced with rendered content:
-
-### Facts
-{{facts_table}}                                    - count of all facts by predicate  
-{{facts_table predicate="sale"}}                   - facts for specific predicate
-{{facts_list}}                                     - show actual facts with values
-{{facts_list predicate="sent" limit="10"}}         - filtered list
-
-### Properties (CTL verification)
-{{property formula="always? '(pred args)"}}        - single property check
-{{property name="Safety" formula="never? '(error ?x)"}}
-{{properties}}                                     - default property checks table
-{{properties checks="Safety: never? '(error); Liveness: eventually? '(done)"}}
-
-### Charts
-{{metrics_chart title="X" predicates="sent,received"}}  - line chart over time
-
-Example usage in MARKDOWN:
-## Verified Properties
-{{properties checks="No errors: never? '(error ?x); Messages delivered: eventually? '(received ?a ?m)"}}
-
-## Collected Facts
-{{facts_list limit="15"}}
-
-## Message Traffic  
-{{metrics_chart title="Traffic" predicates="sent,received"}}
+1. Users see DIAGRAMS in the MARKDOWN section
+2. NEVER put LISP code in the MARKDOWN section  
+3. ALWAYS run (run-scheduler N) in the LISP section to execute simulation
+4. A "Simulation Dashboard" with facts/charts is AUTO-GENERATED - you don't need to include it
 
 ## Output Format
 
@@ -3143,13 +3121,14 @@ ALWAYS use THREE sections:
 Brief response (1-3 sentences).
 
 ===MARKDOWN===
-- Mermaid diagrams in code fences
-- Tool placeholders like {{facts_table}}, {{properties}}, {{metrics_chart}}
+- Mermaid diagrams (stateDiagram-v2, flowchart, sequenceDiagram)
 - English explanations
-- NEVER include (define ...), (spawn-actor ...), Datalog rules, or any code here
+- NEVER include code here
 
 ===LISP===
-Internal code only - users don't see this section.
+- Actor definitions and behaviors
+- MUST include (run-scheduler N) to execute the simulation
+- Users don't see this section directly
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## VALID BOUNDEDLISP CONSTRUCTS (use ONLY these)
@@ -3270,13 +3249,7 @@ stateDiagram-v2
     Producing --> [*]: done after 5 items
 ` + "```" + `
 
-## Message Traffic Over Time
-
-{{metrics_chart title="Producer-Consumer Traffic" predicates="sent,received"}}
-
-## Collected Facts (auto-traced)
-
-{{facts_table}}
+The producer sends 5 items to the consumer, which processes each one.
 
 ===LISP===
 ;; Producer sends 5 items to consumer
@@ -3371,43 +3344,191 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	// Parse the structured response
 	chatResponse, markdown, lisp := parseStructuredResponse(response)
 	
+	fmt.Printf("[chat] parsed: chat=%d chars, markdown=%d chars, lisp=%d chars\n", 
+		len(chatResponse), len(markdown), len(lisp))
+	
 	// Execute LISP code to populate DatalogDB with facts
 	if lisp != "" {
+		fmt.Printf("[chat] executing LISP, facts before=%d\n", len(globalEv.DatalogDB.Facts))
 		parser := NewParser(lisp)
 		exprs := parser.Parse()
 		for _, expr := range exprs {
-			sess.Evaluator.Eval(expr, sess.Evaluator.GlobalEnv)
+			globalEv.Eval(expr, globalEv.GlobalEnv)
 		}
+		fmt.Printf("[chat] LISP done, facts after=%d\n", len(globalEv.DatalogDB.Facts))
 	}
 	
-	// Process tool placeholders in markdown (AFTER executing LISP so facts exist)
-	toolRegistry := NewToolRegistry(sess.Evaluator)
-	markdown = toolRegistry.Process(markdown)
+	// Check if there's new spec content BEFORE updating session
+	hasNewSpec := lisp != "" && lisp != sess.CurrentDoc
+	hasExplicitMarkdown := markdown != "" && markdown != chatResponse // LLM provided distinct markdown
 	
 	// Store LISP as current doc
-	if lisp != "" {
-		if lisp != sess.CurrentDoc {
-			sess.Versions = append(sess.Versions, DocVersion{
-				Version:   len(sess.Versions) + 1,
-				Content:   lisp,
-				Timestamp: time.Now(),
-				Summary:   "Update",
-			})
-			sess.CurrentDoc = lisp
-		}
+	if lisp != "" && lisp != sess.CurrentDoc {
+		sess.Versions = append(sess.Versions, DocVersion{
+			Version:   len(sess.Versions) + 1,
+			Content:   lisp,
+			Timestamp: time.Now(),
+			Summary:   "Update",
+		})
+		sess.CurrentDoc = lisp
 	}
 	
+	// Decide whether to update the document pane
+	var responseMarkdown string
+	if hasNewSpec || hasExplicitMarkdown {
+		// Process tool placeholders in markdown (AFTER executing LISP so facts exist)
+		toolRegistry := NewToolRegistry(globalEv)
+		if markdown != "" {
+			responseMarkdown = toolRegistry.Process(markdown)
+		}
+		// Append deterministic dashboard
+		responseMarkdown += generateDashboard(globalEv)
+	}
+	// If just chatting, don't update document - leave responseMarkdown empty
+	
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"chat_response": chatResponse,
-		"markdown":      markdown,
-		"current_doc":   sess.CurrentDoc,
-		"version":       len(sess.Versions),
+		"chat_response":   chatResponse,
+		"markdown":        responseMarkdown,  // Empty if just chatting
+		"current_doc":     sess.CurrentDoc,
+		"version":         len(sess.Versions),
+		"update_document": hasNewSpec || hasExplicitMarkdown,
 		"usage": map[string]int{
 			"input_tokens":  sess.InputTokens,
 			"output_tokens": sess.OutputTokens,
 			"total_tokens":  sess.InputTokens + sess.OutputTokens,
 		},
 	})
+}
+
+// generateDashboard creates deterministic visualization of simulation state
+// This is appended to LLM output so charts/tables always appear regardless of what LLM generates
+func generateDashboard(ev *Evaluator) string {
+	factCount := len(ev.DatalogDB.Facts)
+	if factCount == 0 {
+		return "" // No simulation data, nothing to show
+	}
+	
+	var sb strings.Builder
+	sb.WriteString("\n\n---\n\n## Simulation Dashboard\n\n")
+	
+	// Collect predicates and their counts
+	predCounts := make(map[string]int)
+	maxTime := int64(0)
+	for _, f := range ev.DatalogDB.Facts {
+		predCounts[f.Predicate]++
+		if f.Time > maxTime {
+			maxTime = f.Time
+		}
+	}
+	
+	// Facts summary table
+	sb.WriteString("### Facts Summary\n\n")
+	sb.WriteString("| Predicate | Count |\n")
+	sb.WriteString("|-----------|-------|\n")
+	for pred, count := range predCounts {
+		sb.WriteString(fmt.Sprintf("| %s | %d |\n", pred, count))
+	}
+	sb.WriteString(fmt.Sprintf("| **Total** | **%d** |\n\n", factCount))
+	
+	// Build chart of all predicates (excluding spawned)
+	var chartPreds []string
+	for pred := range predCounts {
+		if pred != "spawned" {
+			chartPreds = append(chartPreds, pred)
+		}
+	}
+	
+	if len(chartPreds) > 0 {
+		sb.WriteString("### Activity Over Time\n\n")
+		
+		// Handle case where all facts are at time 0
+		if maxTime == 0 {
+			sb.WriteString("*All activity occurred at t=0 (simulation may not have run multiple steps)*\n\n")
+			// Show as bar chart instead
+			sb.WriteString("```mermaid\n")
+			sb.WriteString("xychart-beta\n")
+			sb.WriteString("    title \"Activity Summary\"\n")
+			sb.WriteString("    x-axis [")
+			for i, pred := range chartPreds {
+				if i > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString("\"" + pred + "\"")
+			}
+			sb.WriteString("]\n")
+			maxY := 0
+			for _, pred := range chartPreds {
+				if predCounts[pred] > maxY {
+					maxY = predCounts[pred]
+				}
+			}
+			sb.WriteString(fmt.Sprintf("    y-axis \"Count\" 0 --> %d\n", maxY+5))
+			sb.WriteString("    bar [")
+			for i, pred := range chartPreds {
+				if i > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(fmt.Sprintf("%d", predCounts[pred]))
+			}
+			sb.WriteString("]\n")
+			sb.WriteString("```\n")
+		} else {
+			sb.WriteString("```mermaid\n")
+			sb.WriteString("xychart-beta\n")
+			sb.WriteString("    title \"Simulation Activity\"\n")
+		
+		// Build x-axis
+		step := maxTime / 10
+		if step < 1 {
+			step = 1
+		}
+		var xLabels []string
+		for t := int64(0); t <= maxTime; t += step {
+			xLabels = append(xLabels, fmt.Sprintf("%d", t))
+		}
+		sb.WriteString(fmt.Sprintf("    x-axis [%s]\n", strings.Join(xLabels, ", ")))
+		
+		// Calculate cumulative counts per predicate
+		maxY := 0
+		seriesData := make(map[string][]int)
+		
+		for _, pred := range chartPreds {
+			counts := make([]int, len(xLabels))
+			cumulative := 0
+			
+			bucketIdx := 0
+			for t := int64(0); t <= maxTime && bucketIdx < len(counts); t += step {
+				for _, fact := range ev.DatalogDB.Facts {
+					if fact.Predicate == pred && fact.Time >= t && fact.Time < t+step {
+						cumulative++
+					}
+				}
+				counts[bucketIdx] = cumulative
+				if cumulative > maxY {
+					maxY = cumulative
+				}
+				bucketIdx++
+			}
+			seriesData[pred] = counts
+		}
+		
+		if maxY == 0 {
+			maxY = 10
+		}
+		sb.WriteString(fmt.Sprintf("    y-axis \"Count\" 0 --> %d\n", maxY+5))
+		
+		for pred, counts := range seriesData {
+			countStrs := make([]string, len(counts))
+			for i, c := range counts {
+				countStrs[i] = fmt.Sprintf("%d", c)
+			}
+			sb.WriteString(fmt.Sprintf("    line \"%s\" [%s]\n", pred, strings.Join(countStrs, ", ")))
+		}
+		sb.WriteString("```\n")
+		} // end else (maxTime > 0)
+	}
+	
+	return sb.String()
 }
 
 // Parse structured response with ===CHAT===, ===MARKDOWN===, ===LISP=== sections
@@ -3752,17 +3873,13 @@ func handleGetVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleFacts(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.URL.Query().Get("session_id")
-	sess := getOrCreateSession(sessionID)
-	
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	
 	w.Header().Set("Content-Type", "application/json")
+	
+	ev := globalEv
 	
 	// Collect facts by predicate
 	factsByPred := make(map[string][]map[string]interface{})
-	for _, fact := range sess.Evaluator.DatalogDB.Facts {
+	for _, fact := range ev.DatalogDB.Facts {
 		args := make([]string, len(fact.Args))
 		for i, arg := range fact.Args {
 			args[i] = arg.String()
@@ -3774,159 +3891,143 @@ func handleFacts(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_facts": len(sess.Evaluator.DatalogDB.Facts),
+		"total_facts": len(ev.DatalogDB.Facts),
 		"by_predicate": factsByPred,
-		"rules": len(sess.Evaluator.DatalogDB.Rules),
+		"rules": len(ev.DatalogDB.Rules),
 	})
 }
 
-func handleEval(sessions map[string]*Session) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Code string `json:"code"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		
-		// Get session evaluator from query param
-		sessionID := r.URL.Query().Get("session_id")
-		sess := getOrCreateSession(sessionID)
-		ev := sess.Evaluator
-		
-		fmt.Printf("[eval] session=%s code_len=%d facts_before=%d\n", sessionID, len(req.Code), len(ev.DatalogDB.Facts))
-		
-		// Capture stdout/stderr for error detection
-		var output strings.Builder
-		var errors []string
-		
-		// Parse the code
-		parser := NewParser(req.Code)
-		exprs := parser.Parse()
-		
-		var results []string
-		for _, expr := range exprs {
-			result := ev.Eval(expr, ev.GlobalEnv)
-			resultStr := result.String()
-			results = append(results, resultStr)
-			
-			// Check for error indicators
-			if strings.HasPrefix(resultStr, "Error:") || 
-			   strings.HasPrefix(resultStr, "Undefined symbol:") ||
-			   strings.HasPrefix(resultStr, "Parse error:") ||
-			   strings.Contains(resultStr, "not a function") ||
-			   strings.Contains(resultStr, "wrong number of arguments") ||
-			   strings.Contains(resultStr, "expected") {
-				errors = append(errors, resultStr)
-			}
-			output.WriteString(resultStr)
-			output.WriteString("\n")
-		}
-		
-		fmt.Printf("[eval] session=%s facts_after=%d\n", sessionID, len(ev.DatalogDB.Facts))
-		
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"results": results,
-			"output":  output.String(),
-			"errors":  errors,
-			"success": len(errors) == 0,
-		})
+func handleEval(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code string `json:"code"`
 	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	
+	ev := globalEv
+	// Debug
+	
+	// Capture output and errors
+	var output strings.Builder
+	var errors []string
+	
+	parser := NewParser(req.Code)
+	exprs := parser.Parse()
+	
+	var results []string
+	for _, expr := range exprs {
+		result := ev.Eval(expr, ev.GlobalEnv)
+		resultStr := result.String()
+		results = append(results, resultStr)
+		
+		// Check for error indicators
+		if strings.HasPrefix(resultStr, "Error:") || 
+		   strings.HasPrefix(resultStr, "Undefined symbol:") ||
+		   strings.HasPrefix(resultStr, "Parse error:") ||
+		   strings.Contains(resultStr, "not a function") ||
+		   strings.Contains(resultStr, "wrong number of arguments") ||
+		   strings.Contains(resultStr, "expected") {
+			errors = append(errors, resultStr)
+		}
+		output.WriteString(resultStr)
+		output.WriteString("\n")
+	}
+	
+	// Debug
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"results": results,
+		"output":  output.String(),
+		"errors":  errors,
+		"success": len(errors) == 0,
+	})
 }
 
-func handleProperties(sessions map[string]*Session) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		type Property struct {
-			Name   string `json:"name"`
-			LaTeX  string `json:"latex"`
-			Result string `json:"result"`
-			Pass   bool   `json:"pass"`
+func handleProperties(w http.ResponseWriter, r *http.Request) {
+	type Property struct {
+		Name   string `json:"name"`
+		LaTeX  string `json:"latex"`
+		Result string `json:"result"`
+		Pass   bool   `json:"pass"`
+	}
+	
+	var properties []Property
+	ev := globalEv
+	
+	// Debug
+	
+	factCount := len(ev.DatalogDB.Facts)
+	
+	if factCount > 0 {
+		hasSent := false
+		hasReceived := false
+		hasSpawned := false
+		hasError := false
+		
+		for _, f := range ev.DatalogDB.Facts {
+			switch f.Predicate {
+			case "sent":
+				hasSent = true
+			case "received":
+				hasReceived = true
+			case "spawned":
+				hasSpawned = true
+			case "error":
+				hasError = true
+			}
 		}
 		
-		var properties []Property
-		
-		// Get session evaluator from query param
-		sessionID := r.URL.Query().Get("session_id")
-		sess := getOrCreateSession(sessionID)
-		ev := sess.Evaluator
-		
-		// Log for debugging
-		fmt.Printf("[properties] session=%s facts=%d\n", sessionID, len(ev.DatalogDB.Facts))
-		
-		// Auto-generate properties based on facts in DatalogDB
-		factCount := len(ev.DatalogDB.Facts)
-		
-		if factCount > 0 {
-			// Check for common predicates
-			hasSent := false
-			hasReceived := false
-			hasSpawned := false
-			hasError := false
-			
-			for _, f := range ev.DatalogDB.Facts {
-				switch f.Predicate {
-				case "sent":
-					hasSent = true
-				case "received":
-					hasReceived = true
-				case "spawned":
-					hasSpawned = true
-				case "error":
-					hasError = true
-				}
-			}
-			
-			if hasSpawned {
-				properties = append(properties, Property{
-					Name:   "Actors spawned",
-					LaTeX:  `\text{EF}(\text{spawned}\ ?x)`,
-					Result: "✅ true",
-					Pass:   true,
-				})
-			}
-			
-			if hasSent {
-				properties = append(properties, Property{
-					Name:   "Messages sent",
-					LaTeX:  `\text{EF}(\text{sent}\ ?a\ ?b\ ?m)`,
-					Result: "✅ true",
-					Pass:   true,
-				})
-			}
-			
-			if hasReceived {
-				properties = append(properties, Property{
-					Name:   "Messages received",
-					LaTeX:  `\text{EF}(\text{received}\ ?a\ ?m)`,
-					Result: "✅ true",
-					Pass:   true,
-				})
-			}
-			
-			errorResult := "✅ true"
-			if hasError {
-				errorResult = "❌ false"
-			}
+		if hasSpawned {
 			properties = append(properties, Property{
-				Name:   "No errors",
-				LaTeX:  `\text{AG}(\neg\text{error})`,
-				Result: errorResult,
-				Pass:   !hasError,
-			})
-			
-			properties = append(properties, Property{
-				Name:   "Total facts",
-				LaTeX:  fmt.Sprintf(`%d\ \text{facts}`, factCount),
-				Result: fmt.Sprintf("%d", factCount),
+				Name:   "Actors spawned",
+				LaTeX:  `\text{EF}(\text{spawned}\ ?x)`,
+				Result: "✅ true",
 				Pass:   true,
 			})
 		}
 		
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"properties": properties,
+		if hasSent {
+			properties = append(properties, Property{
+				Name:   "Messages sent",
+				LaTeX:  `\text{EF}(\text{sent}\ ?a\ ?b\ ?m)`,
+				Result: "✅ true",
+				Pass:   true,
+			})
+		}
+		
+		if hasReceived {
+			properties = append(properties, Property{
+				Name:   "Messages received",
+				LaTeX:  `\text{EF}(\text{received}\ ?a\ ?m)`,
+				Result: "✅ true",
+				Pass:   true,
+			})
+		}
+		
+		errorResult := "✅ true"
+		if hasError {
+			errorResult = "❌ false"
+		}
+		properties = append(properties, Property{
+			Name:   "No errors",
+			LaTeX:  `\text{AG}(\neg\text{error})`,
+			Result: errorResult,
+			Pass:   !hasError,
+		})
+		
+		properties = append(properties, Property{
+			Name:   "Total facts",
+			LaTeX:  fmt.Sprintf(`%d\ \text{facts}`, factCount),
+			Result: fmt.Sprintf("%d", factCount),
+			Pass:   true,
 		})
 	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"properties": properties,
+	})
 }
 
 func handleDiagram(ev *Evaluator) http.HandlerFunc {
@@ -4596,7 +4697,7 @@ Click '✨ AI' for smart interpretation."></textarea>
         // Execute LISP code and return results
         async function executeCode(code) {
             try {
-                const resp = await fetch('/eval?session_id=' + encodeURIComponent(sessionId), {
+                const resp = await fetch('/eval', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code })
@@ -4658,13 +4759,14 @@ Click '✨ AI' for smart interpretation."></textarea>
                     updateUsage(data.usage);
                 }
                 
-                if (data.markdown) {
+                // Only update document pane if there's actual spec work
+                if (data.update_document && data.markdown) {
                     currentMarkdown = data.markdown;
-                    updateSpecPanel(); // Always update
+                    updateSpecPanel();
                 }
-                if (data.current_doc) {
+                if (data.update_document && data.current_doc) {
                     currentDoc = data.current_doc;
-                    updateSpecPanel(); // Always update
+                    updateSpecPanel();
                     updateFormalizeButton();
                     
                     // Auto-execute the generated code
@@ -4782,10 +4884,8 @@ Click '✨ AI' for smart interpretation."></textarea>
         async function updatePropertiesPanel() {
             const container = document.getElementById('propertiesContent');
             try {
-                console.log('Fetching properties for session:', sessionId);
-                const resp = await fetch('/properties?session_id=' + encodeURIComponent(sessionId));
+                const resp = await fetch('/properties');
                 const data = await resp.json();
-                console.log('Properties response:', data);
                 
                 if (!data.properties || data.properties.length === 0) {
                     container.innerHTML = '<div class="empty-state">No CTL properties defined yet.</div>';

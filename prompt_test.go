@@ -924,3 +924,51 @@ func TestMetricsChartAutoDetect(t *testing.T) {
 		t.Error("Should not chart spawned predicate")
 	}
 }
+
+func TestDashboardGeneration(t *testing.T) {
+    ev := NewEvaluator(64)
+    
+    // Add some facts
+    ev.DatalogDB.AssertAtTime("sent", 1, Atom("a"), Atom("b"), Atom("msg1"))
+    ev.DatalogDB.AssertAtTime("sent", 2, Atom("a"), Atom("b"), Atom("msg2"))
+    ev.DatalogDB.AssertAtTime("received", 2, Atom("b"), Atom("msg1"))
+    ev.DatalogDB.AssertAtTime("received", 3, Atom("b"), Atom("msg2"))
+    ev.DatalogDB.AssertAtTime("spawned", 0, Atom("a"))
+    ev.DatalogDB.AssertAtTime("spawned", 0, Atom("b"))
+    
+    dashboard := generateDashboard(ev)
+    t.Logf("Dashboard:\n%s", dashboard)
+    
+    if !strings.Contains(dashboard, "Simulation Dashboard") {
+        t.Error("Expected dashboard header")
+    }
+    if !strings.Contains(dashboard, "Facts Summary") {
+        t.Error("Expected facts summary")
+    }
+    if !strings.Contains(dashboard, "xychart-beta") {
+        t.Error("Expected chart")
+    }
+    if !strings.Contains(dashboard, "sent") {
+        t.Error("Expected sent predicate in chart")
+    }
+}
+
+func TestDashboardAllTimeZero(t *testing.T) {
+    ev := NewEvaluator(64)
+    
+    // All facts at time 0
+    ev.DatalogDB.AssertAtTime("sent", 0, Atom("a"), Atom("b"), Atom("msg1"))
+    ev.DatalogDB.AssertAtTime("sent", 0, Atom("a"), Atom("b"), Atom("msg2"))
+    ev.DatalogDB.AssertAtTime("received", 0, Atom("b"), Atom("msg1"))
+    ev.DatalogDB.AssertAtTime("spawned", 0, Atom("a"))
+    
+    dashboard := generateDashboard(ev)
+    t.Logf("Dashboard:\n%s", dashboard)
+    
+    if !strings.Contains(dashboard, "All activity occurred at t=0") {
+        t.Error("Expected warning about all activity at t=0")
+    }
+    if !strings.Contains(dashboard, "bar [") {
+        t.Error("Expected bar chart for t=0 case")
+    }
+}

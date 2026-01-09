@@ -581,10 +581,7 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 					predList = append(predList, p)
 				}
 			}
-			// Add note about auto-detection
-			if len(predList) > 0 {
-				sb.WriteString(fmt.Sprintf("    %%Note: auto-detected predicates (requested %s not found)\n", predicates))
-			}
+			// Note: auto-detected predicates when specified ones not found
 		}
 	} else {
 		// No predicates specified - use all except spawned
@@ -607,6 +604,8 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 	maxY := 0
 	seriesData := make(map[string][]int)
 	
+	// Debug removed
+	
 	for _, pred := range predList {
 		counts := make([]int, len(xLabels))
 		cumulative := 0
@@ -616,6 +615,7 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 			for _, fact := range ev.DatalogDB.Facts {
 				if fact.Predicate == pred && fact.Time >= t && fact.Time < t+step {
 					cumulative++
+					// Debug removed
 				}
 			}
 			counts[bucketIdx] = cumulative
@@ -625,6 +625,7 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 			bucketIdx++
 		}
 		seriesData[pred] = counts
+		// Debug removed
 	}
 	
 	if maxY == 0 {
