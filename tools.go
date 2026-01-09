@@ -556,61 +556,88 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 	}
 	sb.WriteString(fmt.Sprintf("    x-axis [%s]\n", strings.Join(xLabels, ", ")))
 	
-	// Check for predicates to count over time
+	// Collect available predicates with counts
+	availablePreds := make(map[string]int)
+	for _, fact := range ev.DatalogDB.Facts {
+		availablePreds[fact.Predicate]++
+	}
+	
+	// Determine which predicates to chart
+	var predList []string
 	if predicates := args["predicates"]; predicates != "" {
-		predList := strings.Split(predicates, ",")
-		
-		maxY := 0
-		seriesData := make(map[string][]int)
-		hasData := false
-		
-		for _, pred := range predList {
-			pred = strings.TrimSpace(pred)
-			// Count facts per time bucket
-			counts := make([]int, len(xLabels))
-			cumulative := 0
-			
-			bucketIdx := 0
-			for t := int64(0); t <= maxTime && bucketIdx < len(counts); t += step {
-				// Count facts in this time range
-				for _, fact := range ev.DatalogDB.Facts {
-					if fact.Predicate == pred && fact.Time >= t && fact.Time < t+step {
-						cumulative++
-						hasData = true
-					}
-				}
-				counts[bucketIdx] = cumulative
-				if cumulative > maxY {
-					maxY = cumulative
-				}
-				bucketIdx++
+		// Check if specified predicates exist
+		specified := strings.Split(predicates, ",")
+		for _, p := range specified {
+			p = strings.TrimSpace(p)
+			if _, exists := availablePreds[p]; exists {
+				predList = append(predList, p)
 			}
-			seriesData[pred] = counts
 		}
 		
-		if maxY == 0 {
-			maxY = 10
-		}
-		sb.WriteString(fmt.Sprintf("    y-axis \"Count\" 0 --> %d\n", maxY+10))
-		
-		for pred, counts := range seriesData {
-			countStrs := make([]string, len(counts))
-			for i, c := range counts {
-				countStrs[i] = fmt.Sprintf("%d", c)
+		// If none matched, use all available (excluding spawned which is usually just initial)
+		if len(predList) == 0 {
+			for p := range availablePreds {
+				if p != "spawned" {
+					predList = append(predList, p)
+				}
 			}
-			sb.WriteString(fmt.Sprintf("    line \"%s\" [%s]\n", pred, strings.Join(countStrs, ", ")))
-		}
-		
-		// Add warning if no matching facts
-		if !hasData {
-			sb.WriteString("```\n")
-			sb.WriteString(fmt.Sprintf("\n⚠️ **No facts found for predicates: %s.** Actors may not have exchanged messages.\n", args["predicates"]))
-			return sb.String()
+			// Add note about auto-detection
+			if len(predList) > 0 {
+				sb.WriteString(fmt.Sprintf("    %%Note: auto-detected predicates (requested %s not found)\n", predicates))
+			}
 		}
 	} else {
-		// Fallback: show counts of all predicates
-		sb.WriteString("    y-axis \"Count\" 0 --> 100\n")
-		sb.WriteString("    line \"facts\" [0]\n")
+		// No predicates specified - use all except spawned
+		for p := range availablePreds {
+			if p != "spawned" {
+				predList = append(predList, p)
+			}
+		}
+	}
+	
+	if len(predList) == 0 {
+		sb.WriteString("    y-axis \"Count\" 0 --> 10\n")
+		sb.WriteString("    line \"no data\" [0]\n")
+		sb.WriteString("```\n")
+		sb.WriteString("\n⚠️ **No chartable predicates found.**\n")
+		return sb.String()
+	}
+	
+	// Count facts per time bucket for each predicate
+	maxY := 0
+	seriesData := make(map[string][]int)
+	
+	for _, pred := range predList {
+		counts := make([]int, len(xLabels))
+		cumulative := 0
+		
+		bucketIdx := 0
+		for t := int64(0); t <= maxTime && bucketIdx < len(counts); t += step {
+			for _, fact := range ev.DatalogDB.Facts {
+				if fact.Predicate == pred && fact.Time >= t && fact.Time < t+step {
+					cumulative++
+				}
+			}
+			counts[bucketIdx] = cumulative
+			if cumulative > maxY {
+				maxY = cumulative
+			}
+			bucketIdx++
+		}
+		seriesData[pred] = counts
+	}
+	
+	if maxY == 0 {
+		maxY = 10
+	}
+	sb.WriteString(fmt.Sprintf("    y-axis \"Count\" 0 --> %d\n", maxY+10))
+	
+	for pred, counts := range seriesData {
+		countStrs := make([]string, len(counts))
+		for i, c := range counts {
+			countStrs[i] = fmt.Sprintf("%d", c)
+		}
+		sb.WriteString(fmt.Sprintf("    line \"%s\" [%s]\n", pred, strings.Join(countStrs, ", ")))
 	}
 	
 	sb.WriteString("```\n")

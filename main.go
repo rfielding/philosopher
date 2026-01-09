@@ -2960,8 +2960,8 @@ func runServer(ev *Evaluator, port string) {
 	http.HandleFunc("/chat", handleChat)
 	http.HandleFunc("/versions", handleVersions)
 	http.HandleFunc("/version/", handleGetVersion)
-	http.HandleFunc("/eval", handleEval(ev))
-	http.HandleFunc("/properties", handleProperties(ev))
+	http.HandleFunc("/eval", handleEval(sessions))
+	http.HandleFunc("/properties", handleProperties(sessions))
 	http.HandleFunc("/diagram", handleDiagram(ev))
 	http.HandleFunc("/facts", handleFacts)  // Debug: show session facts
 	
@@ -3780,7 +3780,7 @@ func handleFacts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleEval(ev *Evaluator) http.HandlerFunc {
+func handleEval(sessions map[string]*Session) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Code string `json:"code"`
@@ -3789,6 +3789,13 @@ func handleEval(ev *Evaluator) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		
+		// Get session evaluator from query param
+		sessionID := r.URL.Query().Get("session_id")
+		sess := getOrCreateSession(sessionID)
+		ev := sess.Evaluator
+		
+		fmt.Printf("[eval] session=%s code_len=%d facts_before=%d\n", sessionID, len(req.Code), len(ev.DatalogDB.Facts))
 		
 		// Capture stdout/stderr for error detection
 		var output strings.Builder
@@ -3800,7 +3807,7 @@ func handleEval(ev *Evaluator) http.HandlerFunc {
 		
 		var results []string
 		for _, expr := range exprs {
-			result := ev.Eval(expr, nil)
+			result := ev.Eval(expr, ev.GlobalEnv)
 			resultStr := result.String()
 			results = append(results, resultStr)
 			
@@ -3817,6 +3824,8 @@ func handleEval(ev *Evaluator) http.HandlerFunc {
 			output.WriteString("\n")
 		}
 		
+		fmt.Printf("[eval] session=%s facts_after=%d\n", sessionID, len(ev.DatalogDB.Facts))
+		
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"results": results,
 			"output":  output.String(),
@@ -3826,39 +3835,92 @@ func handleEval(ev *Evaluator) http.HandlerFunc {
 	}
 }
 
-func handleProperties(ev *Evaluator) http.HandlerFunc {
+func handleProperties(sessions map[string]*Session) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Evaluate (properties->display) to get list of (name latex) pairs
-		parser := NewParser("(properties->display)")
-		exprs := parser.Parse()
-		
 		type Property struct {
-			Name  string `json:"name"`
-			LaTeX string `json:"latex"`
+			Name   string `json:"name"`
+			LaTeX  string `json:"latex"`
+			Result string `json:"result"`
+			Pass   bool   `json:"pass"`
 		}
 		
 		var properties []Property
 		
-		if len(exprs) > 0 {
-			result := ev.Eval(exprs[0], nil)
-			// Result should be a list of (name latex) pairs
-			if result.Type == TypeList {
-				for _, item := range result.List {
-					if item.Type == TypeList && len(item.List) >= 2 {
-						name := ""
-						latex := ""
-						if item.List[0].Type == TypeSymbol {
-							name = item.List[0].Symbol
-						}
-						if item.List[1].Type == TypeString {
-							latex = item.List[1].Str
-						}
-						if name != "" && latex != "" {
-							properties = append(properties, Property{Name: name, LaTeX: latex})
-						}
-					}
+		// Get session evaluator from query param
+		sessionID := r.URL.Query().Get("session_id")
+		sess := getOrCreateSession(sessionID)
+		ev := sess.Evaluator
+		
+		// Log for debugging
+		fmt.Printf("[properties] session=%s facts=%d\n", sessionID, len(ev.DatalogDB.Facts))
+		
+		// Auto-generate properties based on facts in DatalogDB
+		factCount := len(ev.DatalogDB.Facts)
+		
+		if factCount > 0 {
+			// Check for common predicates
+			hasSent := false
+			hasReceived := false
+			hasSpawned := false
+			hasError := false
+			
+			for _, f := range ev.DatalogDB.Facts {
+				switch f.Predicate {
+				case "sent":
+					hasSent = true
+				case "received":
+					hasReceived = true
+				case "spawned":
+					hasSpawned = true
+				case "error":
+					hasError = true
 				}
 			}
+			
+			if hasSpawned {
+				properties = append(properties, Property{
+					Name:   "Actors spawned",
+					LaTeX:  `\text{EF}(\text{spawned}\ ?x)`,
+					Result: "✅ true",
+					Pass:   true,
+				})
+			}
+			
+			if hasSent {
+				properties = append(properties, Property{
+					Name:   "Messages sent",
+					LaTeX:  `\text{EF}(\text{sent}\ ?a\ ?b\ ?m)`,
+					Result: "✅ true",
+					Pass:   true,
+				})
+			}
+			
+			if hasReceived {
+				properties = append(properties, Property{
+					Name:   "Messages received",
+					LaTeX:  `\text{EF}(\text{received}\ ?a\ ?m)`,
+					Result: "✅ true",
+					Pass:   true,
+				})
+			}
+			
+			errorResult := "✅ true"
+			if hasError {
+				errorResult = "❌ false"
+			}
+			properties = append(properties, Property{
+				Name:   "No errors",
+				LaTeX:  `\text{AG}(\neg\text{error})`,
+				Result: errorResult,
+				Pass:   !hasError,
+			})
+			
+			properties = append(properties, Property{
+				Name:   "Total facts",
+				LaTeX:  fmt.Sprintf(`%d\ \text{facts}`, factCount),
+				Result: fmt.Sprintf("%d", factCount),
+				Pass:   true,
+			})
 		}
 		
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4125,17 +4187,24 @@ const indexHTML = `<!DOCTYPE html>
         .property-item {
             background: #161b22; border: 1px solid #30363d; border-radius: 6px;
             padding: 0.75rem 1rem; margin-bottom: 0.75rem;
+            display: flex; align-items: center; gap: 1rem;
         }
+        .property-item.pass { border-left: 3px solid #3fb950; }
+        .property-item.fail { border-left: 3px solid #f85149; }
         .property-name {
             color: #58a6ff; font-weight: 600; font-size: 0.9rem;
-            margin-bottom: 0.5rem; font-family: 'Fira Code', monospace;
+            font-family: 'Fira Code', monospace; min-width: 140px;
         }
         .property-formula {
-            color: #c9d1d9; font-size: 1.1rem; padding: 0.5rem;
-            background: #0d1117; border-radius: 4px; text-align: center;
-            overflow-x: auto;
+            color: #c9d1d9; font-size: 0.95rem; padding: 0.25rem 0.5rem;
+            background: #0d1117; border-radius: 4px;
+            flex: 1;
         }
-        .property-formula .katex { font-size: 1.1rem; }
+        .property-formula .katex { font-size: 0.95rem; }
+        .property-result {
+            font-family: 'Fira Code', monospace; font-size: 0.85rem;
+            min-width: 80px; text-align: right;
+        }
         
         .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #8b949e; font-style: italic; }
     </style>
@@ -4527,7 +4596,7 @@ Click '✨ AI' for smart interpretation."></textarea>
         // Execute LISP code and return results
         async function executeCode(code) {
             try {
-                const resp = await fetch('/eval', {
+                const resp = await fetch('/eval?session_id=' + encodeURIComponent(sessionId), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code })
@@ -4591,11 +4660,11 @@ Click '✨ AI' for smart interpretation."></textarea>
                 
                 if (data.markdown) {
                     currentMarkdown = data.markdown;
-                    if (currentTab === 'markdown') updateSpecPanel();
+                    updateSpecPanel(); // Always update
                 }
                 if (data.current_doc) {
                     currentDoc = data.current_doc;
-                    if (currentTab === 'code') updateSpecPanel();
+                    updateSpecPanel(); // Always update
                     updateFormalizeButton();
                     
                     // Auto-execute the generated code
@@ -4713,8 +4782,10 @@ Click '✨ AI' for smart interpretation."></textarea>
         async function updatePropertiesPanel() {
             const container = document.getElementById('propertiesContent');
             try {
-                const resp = await fetch('/properties');
+                console.log('Fetching properties for session:', sessionId);
+                const resp = await fetch('/properties?session_id=' + encodeURIComponent(sessionId));
                 const data = await resp.json();
+                console.log('Properties response:', data);
                 
                 if (!data.properties || data.properties.length === 0) {
                     container.innerHTML = '<div class="empty-state">No CTL properties defined yet.</div>';
@@ -4723,18 +4794,21 @@ Click '✨ AI' for smart interpretation."></textarea>
                 
                 let html = '';
                 for (const prop of data.properties) {
-                    html += '<div class="property-item">';
+                    const passClass = prop.pass ? 'pass' : 'fail';
+                    html += '<div class="property-item ' + passClass + '">';
                     html += '<div class="property-name">' + escapeHtml(prop.name) + '</div>';
                     html += '<div class="property-formula">';
                     try {
                         html += katex.renderToString(prop.latex, { 
                             throwOnError: false,
-                            displayMode: true 
+                            displayMode: false 
                         });
                     } catch (e) {
                         html += escapeHtml(prop.latex);
                     }
-                    html += '</div></div>';
+                    html += '</div>';
+                    html += '<div class="property-result">' + (prop.result || '') + '</div>';
+                    html += '</div>';
                 }
                 container.innerHTML = html;
             } catch (err) {

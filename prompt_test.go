@@ -767,8 +767,8 @@ func TestMetricsChartWarning(t *testing.T) {
 		t.Error("Expected warning when no matching facts")
 	}
 	
-	if !strings.Contains(result, "No facts found") {
-		t.Error("Expected 'No facts found' message")
+	if !strings.Contains(result, "No chartable predicates") {
+		t.Error("Expected 'No chartable predicates' message")
 	}
 }
 
@@ -895,5 +895,32 @@ func TestFullRendering(t *testing.T) {
 	}
 	if !strings.Contains(result, "sent") {
 		t.Error("should show sent facts")
+	}
+}
+
+func TestMetricsChartAutoDetect(t *testing.T) {
+	ev := NewEvaluator(64)
+	
+	// Add custom predicates (not sent/received)
+	ev.DatalogDB.AssertAtTime("sync-data", 1, Atom("a"), Atom("b"))
+	ev.DatalogDB.AssertAtTime("sync-data", 2, Atom("a"), Atom("b"))
+	ev.DatalogDB.AssertAtTime("request", 1, Atom("x"))
+	ev.DatalogDB.AssertAtTime("spawned", 0, Atom("server"))
+	
+	tr := NewToolRegistry(ev)
+	
+	// Request sent/received but should auto-detect sync-data and request
+	result := tr.Process(`{{metrics_chart title="Test" predicates="sent,received"}}`)
+	
+	t.Logf("Result:\n%s", result)
+	
+	// Should auto-detect and chart the available predicates
+	if !strings.Contains(result, "sync-data") || !strings.Contains(result, "request") {
+		t.Error("Expected auto-detected predicates sync-data and request")
+	}
+	
+	// Should not include spawned (excluded by default)
+	if strings.Contains(result, "\"spawned\"") {
+		t.Error("Should not chart spawned predicate")
 	}
 }
