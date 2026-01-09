@@ -26,7 +26,9 @@ func NewToolRegistry(ev *Evaluator) *ToolRegistry {
 	tr.tools["state_diagram"] = toolStateDiagram
 	tr.tools["sequence_diagram"] = toolSequenceDiagram
 	tr.tools["property"] = toolProperty
+	tr.tools["properties"] = toolPropertiesTable
 	tr.tools["facts_table"] = toolFactsTable
+	tr.tools["facts_list"] = toolFactsList
 	tr.tools["metrics_chart"] = toolMetricsChart
 	tr.tools["tla_spec"] = toolTLASpec
 	tr.tools["alloy_spec"] = toolAlloySpec
@@ -39,7 +41,7 @@ func (tr *ToolRegistry) Process(markdown string) string {
 	// Pattern: {{tool_name key="value" key2="value2"}}
 	re := regexp.MustCompile(`\{\{(\w+)([^}]*)\}\}`)
 	
-	return re.ReplaceAllStringFunc(markdown, func(match string) string {
+	result := re.ReplaceAllStringFunc(markdown, func(match string) string {
 		parts := re.FindStringSubmatch(match)
 		if len(parts) < 2 {
 			return match // Leave unchanged if can't parse
@@ -59,6 +61,79 @@ func (tr *ToolRegistry) Process(markdown string) string {
 		
 		return fmt.Sprintf("<!-- Unknown tool: %s -->", toolName)
 	})
+	
+	// Clean up mermaid blocks
+	return cleanMermaidBlocks(result)
+}
+
+// cleanMermaidBlocks fixes common mermaid syntax issues
+func cleanMermaidBlocks(markdown string) string {
+	// Find mermaid code blocks and clean each one
+	mermaidRe := regexp.MustCompile("(?s)```mermaid\n(.*?)```")
+	
+	return mermaidRe.ReplaceAllStringFunc(markdown, func(block string) string {
+		// Extract content
+		content := mermaidRe.FindStringSubmatch(block)
+		if len(content) < 2 {
+			return block
+		}
+		
+		cleaned := cleanMermaidSyntax(content[1])
+		return "```mermaid\n" + cleaned + "```"
+	})
+}
+
+// cleanMermaidSyntax fixes specific syntax issues
+func cleanMermaidSyntax(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+	
+	for _, line := range lines {
+		cleaned := line
+		
+		// Fix common label issues in stateDiagram
+		// Replace := with = (mermaid doesn't like :=)
+		cleaned = strings.ReplaceAll(cleaned, ":=", "=")
+		
+		// Fix labels with problematic characters
+		// Pattern: State --> State: label with bad chars
+		if strings.Contains(cleaned, "-->") || strings.Contains(cleaned, "->") {
+			// Remove or escape characters that break mermaid
+			// Colons in labels (except the first one after state name)
+			parts := strings.SplitN(cleaned, ": ", 2)
+			if len(parts) == 2 {
+				// Clean the label part
+				label := parts[1]
+				label = strings.ReplaceAll(label, ":", "-")
+				label = strings.ReplaceAll(label, ";", ",")
+				label = strings.ReplaceAll(label, "\"", "'")
+				// Remove angle brackets and their content markers
+				label = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(label, "")
+				label = strings.ReplaceAll(label, "<", "")
+				label = strings.ReplaceAll(label, ">", "")
+				cleaned = parts[0] + ": " + strings.TrimSpace(label)
+			}
+		}
+		
+		// Fix sequence diagram issues
+		// ->> should not have special chars in message
+		if strings.Contains(cleaned, "->>") || strings.Contains(cleaned, "-->>") {
+			parts := strings.SplitN(cleaned, ": ", 2)
+			if len(parts) == 2 {
+				label := parts[1]
+				label = strings.ReplaceAll(label, "\"", "'")
+				// Remove angle brackets and content
+				label = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(label, "")
+				label = strings.ReplaceAll(label, "<", "")
+				label = strings.ReplaceAll(label, ">", "")
+				cleaned = parts[0] + ": " + strings.TrimSpace(label)
+			}
+		}
+		
+		result = append(result, cleaned)
+	}
+	
+	return strings.Join(result, "\n")
 }
 
 // parseToolArgs extracts key="value" pairs
@@ -155,33 +230,217 @@ func toolProperty(ev *Evaluator, args map[string]string) string {
 		return "<!-- property: missing formula arg -->"
 	}
 	
-	// Parse and evaluate the formula
-	// For now, just format it nicely
-	
-	var result string
-	var resultClass string
-	
-	// Check if it's a temporal operator we can evaluate
-	if strings.HasPrefix(formula, "AG(") {
-		// Extract inner pattern and use never? or always?
-		// TODO: Actually evaluate
-		result = "checking..."
-		resultClass = "pending"
-	} else {
-		result = "?"
-		resultClass = "unknown"
-	}
-	
-	// Return formatted property box (HTML)
 	if name == "" {
 		name = formula
 	}
 	
-	return fmt.Sprintf(`<div class="property-box %s">
-  <span class="property-name">%s</span>
-  <code class="property-formula">%s</code>
-  <span class="property-result">%s</span>
-</div>`, resultClass, name, formula, result)
+	// Parse the formula and evaluate it
+	// Format: "always? '(pred args)" or "eventually? '(pred args)" etc.
+	var result bool
+	var evaluated bool
+	
+	formula = strings.TrimSpace(formula)
+	
+	// Try to parse and evaluate
+	if strings.HasPrefix(formula, "always?") || strings.HasPrefix(formula, "AG") {
+		inner := extractInner(formula)
+		if inner != "" {
+			goal := parseGoalFromString(inner)
+			if goal.Predicate != "" {
+				result = ev.DatalogDB.Always(goal)
+				evaluated = true
+			}
+		}
+	} else if strings.HasPrefix(formula, "eventually?") || strings.HasPrefix(formula, "AF") {
+		inner := extractInner(formula)
+		if inner != "" {
+			goal := parseGoalFromString(inner)
+			if goal.Predicate != "" {
+				result = ev.DatalogDB.Eventually(goal)
+				evaluated = true
+			}
+		}
+	} else if strings.HasPrefix(formula, "never?") || strings.HasPrefix(formula, "AG(not") || strings.HasPrefix(formula, "AG(¬") {
+		inner := extractInner(formula)
+		if inner != "" {
+			goal := parseGoalFromString(inner)
+			if goal.Predicate != "" {
+				result = ev.DatalogDB.Never(goal)
+				evaluated = true
+			}
+		}
+	} else if strings.HasPrefix(formula, "possibly?") || strings.HasPrefix(formula, "EF") {
+		inner := extractInner(formula)
+		if inner != "" {
+			goal := parseGoalFromString(inner)
+			if goal.Predicate != "" {
+				result = ev.DatalogDB.Possibly(goal)
+				evaluated = true
+			}
+		}
+	}
+	
+	// Format result
+	var resultStr, icon string
+	if !evaluated {
+		resultStr = "?"
+		icon = "❓"
+	} else if result {
+		resultStr = "✓ true"
+		icon = "✅"
+	} else {
+		resultStr = "✗ false"
+		icon = "❌"
+	}
+	
+	return fmt.Sprintf("| %s | `%s` | %s %s |", name, formula, icon, resultStr)
+}
+
+// extractInner pulls the predicate pattern from formulas like "always? '(pred args)"
+func extractInner(formula string) string {
+	// Find the quoted list
+	start := strings.Index(formula, "'(")
+	if start == -1 {
+		start = strings.Index(formula, "(")
+		if start == -1 {
+			return ""
+		}
+	} else {
+		start++ // skip the quote
+	}
+	
+	// Find matching close paren
+	depth := 0
+	for i := start; i < len(formula); i++ {
+		if formula[i] == '(' {
+			depth++
+		} else if formula[i] == ')' {
+			depth--
+			if depth == 0 {
+				return formula[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// parseGoalFromString parses "(pred arg1 arg2)" into a Goal
+func parseGoalFromString(s string) Goal {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "(")
+	s = strings.TrimSuffix(s, ")")
+	
+	parts := strings.Fields(s)
+	if len(parts) == 0 {
+		return Goal{}
+	}
+	
+	goal := Goal{Predicate: parts[0]}
+	for _, p := range parts[1:] {
+		if strings.HasPrefix(p, "?") {
+			goal.Args = append(goal.Args, Var(p))
+		} else {
+			goal.Args = append(goal.Args, Atom(p))
+		}
+	}
+	return goal
+}
+
+// toolPropertiesTable renders multiple property checks as a table
+func toolPropertiesTable(ev *Evaluator, args map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString("| Property | Formula | Result |\n")
+	sb.WriteString("|----------|---------|--------|\n")
+	
+	// If specific properties provided, check those
+	if props := args["checks"]; props != "" {
+		for _, p := range strings.Split(props, ";") {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			// Parse "name: formula" or just "formula"
+			var name, formula string
+			if idx := strings.Index(p, ":"); idx > 0 {
+				name = strings.TrimSpace(p[:idx])
+				formula = strings.TrimSpace(p[idx+1:])
+			} else {
+				formula = p
+				name = p
+			}
+			row := toolProperty(ev, map[string]string{"name": name, "formula": formula})
+			sb.WriteString(row)
+			sb.WriteString("\n")
+		}
+	} else {
+		// Default: show common checks
+		checks := []struct{ name, formula string }{
+			{"Messages sent", "eventually? '(sent ?from ?to ?msg)"},
+			{"All actors spawned", "eventually? '(spawned ?name)"},
+		}
+		for _, c := range checks {
+			row := toolProperty(ev, map[string]string{"name": c.name, "formula": c.formula})
+			sb.WriteString(row)
+			sb.WriteString("\n")
+		}
+	}
+	
+	return sb.String()
+}
+
+// toolFactsList shows actual facts (not just counts)
+func toolFactsList(ev *Evaluator, args map[string]string) string {
+	predicate := args["predicate"]
+	limit := 20
+	if l, ok := args["limit"]; ok {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	
+	var sb strings.Builder
+	
+	// Collect facts to show
+	var facts []Fact
+	for _, f := range ev.DatalogDB.Facts {
+		if predicate == "" || f.Predicate == predicate {
+			facts = append(facts, f)
+			if len(facts) >= limit {
+				break
+			}
+		}
+	}
+	
+	if len(facts) == 0 {
+		sb.WriteString("*No facts found.*\n")
+		return sb.String()
+	}
+	
+	// Group by predicate for cleaner output
+	byPred := make(map[string][]Fact)
+	for _, f := range facts {
+		byPred[f.Predicate] = append(byPred[f.Predicate], f)
+	}
+	
+	for pred, pFacts := range byPred {
+		sb.WriteString(fmt.Sprintf("**%s** (%d):\n", pred, len(pFacts)))
+		for _, f := range pFacts {
+			args := make([]string, len(f.Args))
+			for i, a := range f.Args {
+				args[i] = a.String()
+			}
+			if f.Time > 0 {
+				sb.WriteString(fmt.Sprintf("- `(%s %s)` @ t=%d\n", f.Predicate, strings.Join(args, " "), f.Time))
+			} else {
+				sb.WriteString(fmt.Sprintf("- `(%s %s)`\n", f.Predicate, strings.Join(args, " ")))
+			}
+		}
+		sb.WriteString("\n")
+	}
+	
+	if len(ev.DatalogDB.Facts) > limit {
+		sb.WriteString(fmt.Sprintf("*... and %d more facts*\n", len(ev.DatalogDB.Facts)-limit))
+	}
+	
+	return sb.String()
 }
 
 // toolFactsTable renders Datalog query results as table
@@ -282,6 +541,7 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 		sb.WriteString("    y-axis \"Count\" 0 --> 10\n")
 		sb.WriteString("    line \"no data\" [0]\n")
 		sb.WriteString("```\n")
+		sb.WriteString("\n⚠️ **No simulation data.** Did you forget `(run-scheduler N)`?\n")
 		return sb.String()
 	}
 	
@@ -302,6 +562,7 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 		
 		maxY := 0
 		seriesData := make(map[string][]int)
+		hasData := false
 		
 		for _, pred := range predList {
 			pred = strings.TrimSpace(pred)
@@ -315,6 +576,7 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 				for _, fact := range ev.DatalogDB.Facts {
 					if fact.Predicate == pred && fact.Time >= t && fact.Time < t+step {
 						cumulative++
+						hasData = true
 					}
 				}
 				counts[bucketIdx] = cumulative
@@ -326,6 +588,9 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 			seriesData[pred] = counts
 		}
 		
+		if maxY == 0 {
+			maxY = 10
+		}
 		sb.WriteString(fmt.Sprintf("    y-axis \"Count\" 0 --> %d\n", maxY+10))
 		
 		for pred, counts := range seriesData {
@@ -334,6 +599,13 @@ func toolMetricsChart(ev *Evaluator, args map[string]string) string {
 				countStrs[i] = fmt.Sprintf("%d", c)
 			}
 			sb.WriteString(fmt.Sprintf("    line \"%s\" [%s]\n", pred, strings.Join(countStrs, ", ")))
+		}
+		
+		// Add warning if no matching facts
+		if !hasData {
+			sb.WriteString("```\n")
+			sb.WriteString(fmt.Sprintf("\n⚠️ **No facts found for predicates: %s.** Actors may not have exchanged messages.\n", args["predicates"]))
+			return sb.String()
 		}
 	} else {
 		// Fallback: show counts of all predicates

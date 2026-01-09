@@ -515,6 +515,7 @@ type Evaluator struct {
 	GensymCount  int64
 	Scheduler    *Scheduler
 	DatalogDB    *DatalogDB  // Embedded Datalog for temporal reasoning
+	SeenErrors   map[string]bool // Avoid repeating same error
 }
 
 // ============================================================================
@@ -715,6 +716,7 @@ func NewEvaluator(callStackDepth int) *Evaluator {
 		GensymCount: 0,
 		Scheduler:   NewScheduler(),
 		DatalogDB:   NewDatalogDB(),
+		SeenErrors:  make(map[string]bool),
 	}
 	ev.setupBuiltins()
 	return ev
@@ -987,7 +989,11 @@ func (ev *Evaluator) evalStep(expr Value, env *Env) Value {
 		if v, ok := env.Get(expr.Symbol); ok {
 			return v
 		}
-		fmt.Fprintf(os.Stderr, "Undefined symbol: %s\n", expr.Symbol)
+		errKey := "undefined:" + expr.Symbol
+		if !ev.SeenErrors[errKey] {
+			ev.SeenErrors[errKey] = true
+			fmt.Fprintf(os.Stderr, "Undefined symbol: %s\n", expr.Symbol)
+		}
 		return Nil()
 
 	case TypeList:
@@ -2284,7 +2290,11 @@ func builtinSelf(ev *Evaluator, args []Value, env *Env) Value {
 // AUTO-TRACES: asserts (sent from to msg time) fact
 func builtinSendTo(ev *Evaluator, args []Value, env *Env) Value {
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "send-to!: need actor-name and message")
+		errKey := "send-to-args"
+		if !ev.SeenErrors[errKey] {
+			ev.SeenErrors[errKey] = true
+			fmt.Fprintln(os.Stderr, "send-to!: need actor-name and message")
+		}
 		return Nil()
 	}
 	
@@ -2296,14 +2306,22 @@ func builtinSendTo(ev *Evaluator, args []Value, env *Env) Value {
 	} else if args[0].Type == TypeActor {
 		targetName = args[0].Symbol
 	} else {
-		fmt.Fprintln(os.Stderr, "send-to!: target must be symbol, string, or actor ref")
+		errKey := "send-to-type"
+		if !ev.SeenErrors[errKey] {
+			ev.SeenErrors[errKey] = true
+			fmt.Fprintln(os.Stderr, "send-to!: target must be symbol, string, or actor ref (use 'actor-name)")
+		}
 		return Nil()
 	}
 	
 	target := ev.Scheduler.GetActor(targetName)
     ev.markGuardSeen() // CSP: send is a synchronization point
 	if target == nil {
-		fmt.Fprintf(os.Stderr, "send-to!: unknown actor %s\n", targetName)
+		errKey := "send-to-unknown:" + targetName
+		if !ev.SeenErrors[errKey] {
+			ev.SeenErrors[errKey] = true
+			fmt.Fprintf(os.Stderr, "send-to!: unknown actor %s\n", targetName)
+		}
 		return Nil()
 	}
 	
@@ -2748,28 +2766,28 @@ func runPrompt(ev *Evaluator, promptArg string) {
 	var apiKey string
 	
 	switch provider {
-	case "openai":
-		apiKey = os.Getenv("OPENAI_API_KEY")
+	case "anthropic":
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
 	case "gemini":
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	default:
-		provider = "anthropic"
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+		provider = "openai"
+		apiKey = os.Getenv("OPENAI_API_KEY")
 	}
 	
 	if apiKey == "" {
-		// Try to find any available key
-		if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
-			apiKey = k
-			provider = "anthropic"
-		} else if k := os.Getenv("OPENAI_API_KEY"); k != "" {
+		// Try to find any available key - OpenAI first (cheaper unlimited)
+		if k := os.Getenv("OPENAI_API_KEY"); k != "" {
 			apiKey = k
 			provider = "openai"
+		} else if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
+			apiKey = k
+			provider = "anthropic"
 		} else if k := os.Getenv("GEMINI_API_KEY"); k != "" {
 			apiKey = k
 			provider = "gemini"
 		} else {
-			fmt.Fprintln(os.Stderr, "No API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY")
+			fmt.Fprintln(os.Stderr, "No API key found. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY")
 			os.Exit(1)
 		}
 	}
@@ -2999,10 +3017,10 @@ func runConsoleChat(hasAnthropic, hasOpenAI, hasGemini bool) {
 	reader := bufio.NewReader(os.Stdin)
 	sess := getOrCreateSession("console")
 	
-	provider := "anthropic"
-	if !hasAnthropic && hasOpenAI {
-		provider = "openai"
-	} else if !hasAnthropic && !hasOpenAI && hasGemini {
+	provider := "openai"
+	if !hasOpenAI && hasAnthropic {
+		provider = "anthropic"
+	} else if !hasOpenAI && !hasAnthropic && hasGemini {
 		provider = "gemini"
 	}
 	
@@ -3081,18 +3099,41 @@ func loadLispModules(ev *Evaluator) {
 
 const systemPrompt = `You are a requirements engineer helping users specify multi-party protocols.
 
-## CRITICAL: What Users See
+## CRITICAL RULES
 
-Users see DIAGRAMS and TABLES, not code. Never show LISP or Datalog to users.
+1. Users see DIAGRAMS and TABLES, not code
+2. NEVER put LISP code OR Datalog rules in the MARKDOWN section
+3. ALWAYS use tool placeholders for facts and charts (they render automatically)
+4. ALWAYS run a simulation with actual message passing to populate charts
 
-## Tool Placeholders
+## Tool Placeholders (REQUIRED for showing data)
 
-Use these in your MARKDOWN section - they render automatically:
+In your MARKDOWN section, use these EXACTLY - they get replaced with rendered content:
 
-{{facts_table}}                                    - summary of all facts by predicate  
+### Facts
+{{facts_table}}                                    - count of all facts by predicate  
 {{facts_table predicate="sale"}}                   - facts for specific predicate
-{{property formula="AG(inv >= 0)"}}                - verification result
-{{metrics_chart title="X" predicates="sent,received"}}  - cumulative chart over time
+{{facts_list}}                                     - show actual facts with values
+{{facts_list predicate="sent" limit="10"}}         - filtered list
+
+### Properties (CTL verification)
+{{property formula="always? '(pred args)"}}        - single property check
+{{property name="Safety" formula="never? '(error ?x)"}}
+{{properties}}                                     - default property checks table
+{{properties checks="Safety: never? '(error); Liveness: eventually? '(done)"}}
+
+### Charts
+{{metrics_chart title="X" predicates="sent,received"}}  - line chart over time
+
+Example usage in MARKDOWN:
+## Verified Properties
+{{properties checks="No errors: never? '(error ?x); Messages delivered: eventually? '(received ?a ?m)"}}
+
+## Collected Facts
+{{facts_list limit="15"}}
+
+## Message Traffic  
+{{metrics_chart title="Traffic" predicates="sent,received"}}
 
 ## Output Format
 
@@ -3102,8 +3143,10 @@ ALWAYS use THREE sections:
 Brief response (1-3 sentences).
 
 ===MARKDOWN===
-Diagrams via mermaid fences, tool placeholders, English explanations.
-NEVER include LISP code blocks here.
+- Mermaid diagrams in code fences
+- Tool placeholders like {{facts_table}}, {{properties}}, {{metrics_chart}}
+- English explanations
+- NEVER include (define ...), (spawn-actor ...), Datalog rules, or any code here
 
 ===LISP===
 Internal code only - users don't see this section.
@@ -3137,18 +3180,30 @@ CORRECT pattern:
   (let msg (receive!)                    ; ALWAYS receive first
     (cond
       ((eq? (nth msg 0) 'do-x)           ; use eq? for comparison
-       (send-to! 'other (list 'response))
+       (send-to! 'other (list 'response))  ; NOTE: 'other is QUOTED
        (list 'become (list 'my-actor (+ state 1))))  ; MUST use become
       (else
        (list 'become (list 'my-actor state))))))
 
 WRONG patterns (do NOT use):
-  (loop)                    ; NO - don't use recursion, use (list 'become ...)
+  (loop)                    ; NO - don't use recursion
   (recur)                   ; NO - use (list 'become ...)
+  (send-to! other msg)      ; NO - MUST quote actor name: (send-to! 'other msg)
+  (spawn-actor name ...)    ; NO - MUST quote: (spawn-actor 'name ...)
 
-REQUIRED to run simulation:
-(spawn-actor 'name 10 '(fn args))   ; spawn each actor
-(run-scheduler 100)                  ; run the simulation!
+## SIMULATION REQUIREMENTS (CRITICAL!)
+
+To generate facts and see data in charts, you MUST:
+
+1. SPAWN actors:     (spawn-actor 'name 10 '(fn args))
+2. SEND messages:    Have actors send-to! each other  
+3. RUN simulation:   (run-scheduler 100)
+
+Without run-scheduler, NO FACTS are generated and charts will be EMPTY!
+
+⚠️ DO NOT just define rules without running a simulation!
+⚠️ DO NOT show Datalog rules in MARKDOWN - put them in LISP section!
+⚠️ Charts REQUIRE actual message passing between actors!
 
 ### Auto-Tracing (happens automatically!)
 Every spawn/send/receive creates facts:
@@ -3163,10 +3218,11 @@ Every spawn/send/receive creates facts:
 
 Datalog does NOT support: not, negation, aggregation, arithmetic in rules
 
-### Temporal
-(never? '(bad-state ?x))      ; AG(not ...)
-(eventually? '(goal ?x))      ; EF(...)
-(always? '(invariant ?x))     ; AG(...)
+### Temporal (CTL operators)
+(always? '(invariant ?x))     ; AG - p holds at ALL times
+(eventually? '(goal ?x))      ; AF - p WILL hold (inevitable)
+(possibly? '(goal ?x))        ; EF - p MIGHT hold (possible)
+(never? '(bad-state ?x))      ; AG(¬p) - p never holds
 
 ### NOT VALID (these don't exist - never use them):
 - state-machine, transition, next-state, initial-state
@@ -3177,8 +3233,27 @@ Datalog does NOT support: not, negation, aggregation, arithmetic in rules
 ## Mermaid Syntax
 
 FORBIDDEN in labels (causes parse errors):
-- := (use '= instead)
-- >= <= != (use gte, lte, neq instead)
+- := (use = instead)
+- >= <= != (use gte, lte, neq)
+- Quotes " (use single quotes ')
+- Angle brackets < > (use lt, gt)
+- Semicolons ; (use commas)
+- Multiple colons in labels
+
+SAFE diagram patterns:
+
+stateDiagram-v2:
+    [*] --> StateName
+    StateName --> OtherState: simple label
+    OtherState --> [*]
+
+sequenceDiagram:
+    Actor1->>Actor2: message
+    Actor2-->>Actor1: response
+
+flowchart LR:
+    A[Box] --> B[Box]
+    B --> C{Decision}
 
 ## Example Response
 
@@ -4073,8 +4148,8 @@ const indexHTML = `<!DOCTYPE html>
             <span class="spacer"></span>
             <span id="usage" class="usage" title="Session token usage"></span>
             <select id="provider">
-                <option value="anthropic">Claude</option>
                 <option value="openai">GPT-4</option>
+                <option value="anthropic">Claude</option>
                 <option value="gemini">Gemini</option>
             </select>
         </div>
@@ -5613,6 +5688,8 @@ func (db *DatalogDB) solveBetween(goal Goal, rest []Goal, bindings Binding, dept
 // ============================================================================
 
 // Always checks if a goal holds for all times in the trace (AG)
+// AG: Always/Globally - p holds at ALL times on ALL paths
+// For a single execution trace, checks every timestep
 func (db *DatalogDB) Always(goal Goal) bool {
 	// Get all unique times from facts
 	times := make(map[int64]bool)
@@ -5640,15 +5717,29 @@ func (db *DatalogDB) Always(goal Goal) bool {
 	return true
 }
 
-// Eventually checks if a goal holds at some time
+// AF: Always Finally - p WILL hold eventually on ALL paths (inevitable)
+// For a single execution trace, checks if p holds at some timestep
 func (db *DatalogDB) Eventually(goal Goal) bool {
 	results := db.solve([]Goal{goal}, make(Binding), 0)
 	return len(results) > 0
 }
 
-// Never checks if a goal never holds
+// EF: Exists Finally - p MIGHT hold on SOME path (possible)
+// For a single execution trace, same as AF
+func (db *DatalogDB) Possibly(goal Goal) bool {
+	return db.Eventually(goal)
+}
+
+// AG(¬p): p never holds
 func (db *DatalogDB) Never(goal Goal) bool {
 	return !db.Eventually(goal)
+}
+
+// EG: Exists Globally - there EXISTS a path where p holds always
+// For a single trace, same as AG. Used to find counterexamples to AF.
+// If EG(¬p) is true, then AF(p) is false (counterexample exists)
+func (db *DatalogDB) ExistsAlways(goal Goal) bool {
+	return db.Always(goal)
 }
 
 // LeadsTo checks if whenever goal1 holds, goal2 eventually holds after
@@ -5870,7 +5961,8 @@ func RegisterDatalogBuiltins(ev *Evaluator) {
 		return bindingsToLisp(results)
 	}})
 
-	// (always? (goal))
+	// CTL Temporal Operators
+	// AG: (always? (goal)) - p holds at ALL times (necessarily)
 	env.Set("always?", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
 		if len(args) < 1 || args[0].Type != TypeList {
 			return Bool(false)
@@ -5879,7 +5971,7 @@ func RegisterDatalogBuiltins(ev *Evaluator) {
 		return Bool(ev.DatalogDB.Always(goal))
 	}})
 
-	// (eventually? (goal))
+	// AF: (eventually? (goal)) - p WILL hold at some time (inevitable)
 	env.Set("eventually?", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
 		if len(args) < 1 || args[0].Type != TypeList {
 			return Bool(false)
@@ -5888,7 +5980,17 @@ func RegisterDatalogBuiltins(ev *Evaluator) {
 		return Bool(ev.DatalogDB.Eventually(goal))
 	}})
 
-	// (never? (goal))
+	// EF: (possibly? (goal)) - p MIGHT hold at some time (possible)
+	// Note: For single trace, same as eventually?
+	env.Set("possibly?", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
+		if len(args) < 1 || args[0].Type != TypeList {
+			return Bool(false)
+		}
+		goal := parseGoal(args[0])
+		return Bool(ev.DatalogDB.Possibly(goal))
+	}})
+
+	// AG(¬p): (never? (goal)) - p never holds
 	env.Set("never?", Value{Type: TypeBuiltin, Builtin: func(ev *Evaluator, args []Value, env *Env) Value {
 		if len(args) < 1 || args[0].Type != TypeList {
 			return Bool(true)

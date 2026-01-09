@@ -653,3 +653,247 @@ func TestTemporalSafetyViolation(t *testing.T) {
 		t.Error("eventually? (balance -1) should be true")
 	}
 }
+
+func TestToolSubstitutionFullPipeline(t *testing.T) {
+	ev := NewEvaluator(1000)
+	
+	// Simulate what runPrompt does
+	lisp := `
+		(define (producer n)
+		  (if (> n 0)
+			(begin
+			  (assert! 'produced n)
+			  (list 'become (list 'producer (- n 1))))
+			(done!)))
+		(spawn-actor 'p1 10 '(producer 5))
+		(run-scheduler 20)
+	`
+	
+	// Execute LISP
+	parser := NewParser(lisp)
+	exprs := parser.Parse()
+	for _, expr := range exprs {
+		ev.Eval(expr, ev.GlobalEnv)
+	}
+	
+	// Now test tool substitution
+	markdown := `## Facts
+
+{{facts_table}}
+
+## Chart
+
+{{metrics_chart title="Test" predicates="produced,spawned"}}
+`
+	
+	tr := NewToolRegistry(ev)
+	result := tr.Process(markdown)
+	
+	t.Logf("Input markdown:\n%s", markdown)
+	t.Logf("Output markdown:\n%s", result)
+	
+	// Should NOT contain {{facts_table}}
+	if strings.Contains(result, "{{facts_table}}") {
+		t.Error("facts_table placeholder was not substituted")
+	}
+	
+	// Should contain actual rendered table
+	if !strings.Contains(result, "produced") || !strings.Contains(result, "|") {
+		t.Error("facts_table should render a markdown table with 'produced'")
+	}
+	
+	// Should contain chart
+	if !strings.Contains(result, "xychart") {
+		t.Error("metrics_chart should render an xychart")
+	}
+}
+
+func TestMermaidCleanup(t *testing.T) {
+	ev := NewEvaluator(64)
+	tr := NewToolRegistry(ev)
+	
+	tests := []struct {
+		name     string
+		input    string
+		contains string
+		excludes string
+	}{
+		{
+			name: "fix := in labels",
+			input: "```mermaid\nstateDiagram-v2\n    A --> B: x := 5\n```",
+			contains: "x = 5",
+			excludes: ":=",
+		},
+		{
+			name: "fix angle brackets",
+			input: "```mermaid\nsequenceDiagram\n    A->>B: send <data>\n```",
+			contains: "A->>B: send",
+			excludes: "<",
+		},
+		{
+			name: "preserve valid mermaid",
+			input: "```mermaid\nstateDiagram-v2\n    [*] --> Ready\n    Ready --> Done\n```",
+			contains: "[*] --> Ready",
+			excludes: "",
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tr.Process(tt.input)
+			if tt.contains != "" && !strings.Contains(result, tt.contains) {
+				t.Errorf("expected to contain %q, got:\n%s", tt.contains, result)
+			}
+			if tt.excludes != "" && strings.Contains(result, tt.excludes) {
+				t.Errorf("expected to NOT contain %q, got:\n%s", tt.excludes, result)
+			}
+		})
+	}
+}
+
+func TestMetricsChartWarning(t *testing.T) {
+	ev := NewEvaluator(64)
+	
+	// Only add a spawned fact, no sent/received
+	ev.DatalogDB.AssertAtTime("spawned", 1, Atom("test"))
+	
+	tr := NewToolRegistry(ev)
+	
+	result := tr.Process(`{{metrics_chart title="Test" predicates="sent,received"}}`)
+	
+	t.Logf("Result:\n%s", result)
+	
+	if !strings.Contains(result, "⚠️") {
+		t.Error("Expected warning when no matching facts")
+	}
+	
+	if !strings.Contains(result, "No facts found") {
+		t.Error("Expected 'No facts found' message")
+	}
+}
+
+func TestPropertyTool(t *testing.T) {
+	ev := NewEvaluator(64)
+	
+	// Add facts - note: always? checks ALL times in the DB
+	ev.DatalogDB.AssertAtTime("temperature", 1, Atom("ok"))
+	ev.DatalogDB.AssertAtTime("temperature", 2, Atom("ok"))
+	ev.DatalogDB.AssertAtTime("temperature", 3, Atom("ok"))
+	// Add error at t=3 (same time as temp ok, so always? still works)
+	ev.DatalogDB.AssertAtTime("error", 3, Atom("overflow"))
+	
+	tr := NewToolRegistry(ev)
+	
+	tests := []struct {
+		name     string
+		formula  string
+		contains string
+	}{
+		// All times (1,2,3) have temp ok, so AG passes
+		{"always temp ok", `{{property formula="always? '(temperature ok)"}}`, "✅"},
+		{"eventually error", `{{property formula="eventually? '(error overflow)"}}`, "✅"},
+		{"never error", `{{property formula="never? '(error overflow)"}}`, "❌"},
+		{"never missing", `{{property formula="never? '(missing thing)"}}`, "✅"},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tr.Process(tt.formula)
+			t.Logf("%s -> %s", tt.formula, result)
+			if !strings.Contains(result, tt.contains) {
+				t.Errorf("expected %s, got %s", tt.contains, result)
+			}
+		})
+	}
+}
+
+func TestFactsListTool(t *testing.T) {
+	ev := NewEvaluator(64)
+	
+	ev.DatalogDB.AssertAtTime("spawned", 1, Atom("alice"))
+	ev.DatalogDB.AssertAtTime("spawned", 1, Atom("bob"))
+	ev.DatalogDB.AssertAtTime("sent", 2, Atom("alice"), Atom("bob"), Atom("hello"))
+	
+	tr := NewToolRegistry(ev)
+	
+	result := tr.Process("{{facts_list}}")
+	t.Logf("Facts list:\n%s", result)
+	
+	if !strings.Contains(result, "spawned") {
+		t.Error("should contain spawned")
+	}
+	if !strings.Contains(result, "alice") {
+		t.Error("should contain alice")
+	}
+}
+
+func TestPropertiesTableTool(t *testing.T) {
+	ev := NewEvaluator(64)
+	
+	ev.DatalogDB.AssertAtTime("spawned", 1, Atom("test"))
+	ev.DatalogDB.AssertAtTime("sent", 2, Atom("a"), Atom("b"), Atom("msg"))
+	
+	tr := NewToolRegistry(ev)
+	
+	result := tr.Process("{{properties}}")
+	t.Logf("Properties table:\n%s", result)
+	
+	if !strings.Contains(result, "Property") {
+		t.Error("should have table header")
+	}
+	if !strings.Contains(result, "✅") {
+		t.Error("should have at least one passing check")
+	}
+}
+
+func TestFullRendering(t *testing.T) {
+	ev := NewEvaluator(64)
+	
+	// Simulate
+	lisp := `
+(define (producer n)
+  (if (> n 0)
+    (begin
+      (send-to! 'consumer (list 'item n))
+      (list 'become (list 'producer (- n 1))))
+    (done!)))
+
+(define (consumer)
+  (let msg (receive!)
+    (assert! 'processed (nth msg 1))
+    (list 'become '(consumer))))
+
+(spawn-actor 'producer 10 '(producer 3))
+(spawn-actor 'consumer 10 '(consumer))
+(run-scheduler 20)
+`
+	for _, e := range NewParser(lisp).Parse() {
+		ev.Eval(e, ev.GlobalEnv)
+	}
+	
+	tr := NewToolRegistry(ev)
+	
+	markdown := `## Properties
+{{properties checks="Items processed: eventually? '(processed 1); No crashes: never? '(error ?x)"}}
+
+## Facts Summary
+{{facts_table}}
+
+## Actual Facts
+{{facts_list limit="10"}}
+`
+	
+	result := tr.Process(markdown)
+	t.Logf("Rendered markdown:\n%s", result)
+	
+	// Check for expected content
+	if !strings.Contains(result, "✅") {
+		t.Error("should have passing properties")
+	}
+	if !strings.Contains(result, "spawned") {
+		t.Error("should show spawned facts")
+	}
+	if !strings.Contains(result, "sent") {
+		t.Error("should show sent facts")
+	}
+}
